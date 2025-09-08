@@ -448,16 +448,15 @@ class YFinanceDataHandler:
             logging.error(f"Error calculating relative prices: {str(e)}")
             raise
 
-    def get_combined_data(self, symbols: List[str], column: str = 'close') -> pd.DataFrame:
+    def get_combined_data(self, symbols: List[str]) -> pd.DataFrame:
         """
-        Get data for multiple symbols in a single DataFrame with row-bound structure.
+        Get complete data for multiple symbols in a single DataFrame with row-bound structure.
         
         Args:
             symbols (List[str]): List of symbols
-            column (str): Column to extract for each symbol ('close', 'open', 'high', 'low', 'volume')
             
         Returns:
-            pd.DataFrame: DataFrame with columns [date, symbol, value] - row-bound format
+            pd.DataFrame: DataFrame with all columns plus 'symbol' column - row-bound format
         """
         
         try:
@@ -468,21 +467,23 @@ class YFinanceDataHandler:
                     logging.info(f"Downloading missing data for {symbol}")
                     self.download_data(symbol)
                 
-                data = self.get_data(symbol, [column])
+                data = self.get_data(symbol)  # Get all data, no column filtering
                 if not data.empty:
-                    # Convert to row format
-                    symbol_rows = data.reset_index()
-                    symbol_rows['symbol'] = symbol
-                    symbol_rows = symbol_rows[['Date', 'symbol', column]]
-                    symbol_rows.columns = ['date', 'symbol', 'value']
-                    combined_rows.append(symbol_rows)
+                    # Convert to row format with all columns
+                    symbol_data = data.reset_index()
+                    symbol_data['symbol'] = symbol
+                    # Reorder columns to put 'symbol' after 'Date'
+                    cols = ['Date', 'symbol'] + [col for col in symbol_data.columns if col not in ['Date', 'symbol']]
+                    symbol_data = symbol_data[cols]
+                    combined_rows.append(symbol_data)
             
             if combined_rows:
                 result = pd.concat(combined_rows, ignore_index=True)
-                result = result.sort_values(['date', 'symbol']).reset_index(drop=True)
+                result = result.sort_values(['Date', 'symbol']).reset_index(drop=True)
                 return result
             else:
-                return pd.DataFrame(columns=['date', 'symbol', 'value'])
+                # Return empty DataFrame with expected structure (assuming common OHLCV columns)
+                return pd.DataFrame(columns=['Date', 'symbol', 'open', 'high', 'low', 'close', 'volume'])
                 
         except Exception as e:
             logging.error(f"Error combining symbols data: {str(e)}")
