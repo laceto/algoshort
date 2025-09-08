@@ -1,5 +1,4 @@
 
-Il contenuto è generato dagli utenti e non verificato.
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -8,6 +7,8 @@ from typing import Union, List, Dict, Optional, Tuple
 import logging
 import warnings
 from pathlib import Path
+from algoshort.utils import relative
+import os
 
 class YFinanceDataHandler:
     """
@@ -425,17 +426,13 @@ class YFinanceDataHandler:
             
             # Prepare data for relative calculation
             main_data = self.get_ohlc_data(symbol)
-            benchmark_data = self.get_data(benchmark_symbol, ['date', benchmark_column]).reset_index()
-            benchmark_data.columns = benchmark_data.columns.str.lower()
+            benchmark_data = self.get_ohlc_data(benchmark_symbol).reset_index()[['date', benchmark_column]]
             
             # Ensure proper column naming
             if 'date' not in benchmark_data.columns:
                 benchmark_data = benchmark_data.reset_index()
                 benchmark_data.rename(columns={benchmark_data.columns[0]: 'date'}, inplace=True)
-            
-            # Import and use the relative function (assuming it's available)
-            from your_module import relative  # Adjust import as needed
-            
+             
             result = relative(
                 df=main_data,
                 _o='open', _h='high', _l='low', _c='close',
