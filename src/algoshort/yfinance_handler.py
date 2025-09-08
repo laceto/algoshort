@@ -6,6 +6,8 @@ from typing import Union, List, Dict, Optional, Tuple
 import logging
 import warnings
 from pathlib import Path
+from algoshort.utils import relative
+import os
 
 class YFinanceDataHandler:
     """
@@ -269,8 +271,8 @@ class YFinanceDataHandler:
             
             # Prepare data for relative calculation
             main_data = self.get_ohlc_data(symbol)
-            benchmark_data = self.get_data(benchmark_symbol, ['date', benchmark_column]).reset_index()
-            benchmark_data.columns = benchmark_data.columns.str.lower()
+            benchmark_data = self.get_ohlc_data('FTSEMIB.MI').reset_index()[['date', 'close']]
+            # benchmark_data.columns = benchmark_data.columns.str.lower()
             
             # Ensure proper column naming
             if 'date' not in benchmark_data.columns:
@@ -278,7 +280,7 @@ class YFinanceDataHandler:
                 benchmark_data.rename(columns={benchmark_data.columns[0]: 'date'}, inplace=True)
             
             # Import and use the relative function (assuming it's available)
-            from your_module import relative  # Adjust import as needed
+            # from your_module import relative  # Adjust import as needed
             
             result = relative(
                 df=main_data,
@@ -371,58 +373,69 @@ class YFinanceDataHandler:
         
         return summary
 
+
     def save_data(self, filepath: str, symbols: Optional[List[str]] = None, format: str = 'csv'):
         """
-        Save data to file.
+        Save financial data to a file or multiple files based on the requested format.
         
         Args:
-            filepath (str): Path to save file
-            symbols (List[str], optional): Specific symbols to save
+            filepath (str): Path to save file (base path for multiple symbols)
+            symbols (List[str], optional): Specific symbols to save (defaults to all self.symbols)
             format (str): File format ('csv', 'excel', 'parquet')
         """
-        
         try:
             symbols_to_save = symbols or self.symbols
-            
+            if not symbols_to_save:
+                raise ValueError("No symbols to save. Provide symbols or ensure self.symbols is populated.")
+
+            # Validate data availability
+            missing_symbols = [s for s in symbols_to_save if s not in self.data]
+            if missing_symbols:
+                logging.warning(f"No data found for: {missing_symbols}")
+            symbols_to_save = [s for s in symbols_to_save if s in self.data]
+
+            # Save single symbol
             if len(symbols_to_save) == 1:
-                data = self.data[symbols_to_save[0]]
-            else:
-                # Combine multiple symbols
-                combined_data = {}
-                for symbol in symbols_to_save:
-                    if symbol in self.data:
-                        combined_data[symbol] = self.data[symbol]
-            
-            if format.lower() == 'csv':
-                if len(symbols_to_save) == 1:
-                    data.to_csv(filepath)
+                symbol = symbols_to_save[0]
+                df = self.data[symbol]
+
+                if format.lower() == 'csv':
+                    df.to_csv(filepath, index=False)
+                elif format.lower() == 'excel':
+                    with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+                        df.to_excel(writer, sheet_name=symbol, index=False)
+                elif format.lower() == 'parquet':
+                    df.to_parquet(filepath, index=False)
                 else:
-                    # Save each symbol to separate sheet or file
-                    for symbol, data in combined_data.items():
-                        symbol_path = filepath.replace('.csv', f'_{symbol}.csv')
-                        data.to_csv(symbol_path)
-                        
-            elif format.lower() == 'excel':
-                with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
-                    if len(symbols_to_save) == 1:
-                        data.to_excel(writer, sheet_name=symbols_to_save[0])
-                    else:
-                        for symbol, data in combined_data.items():
-                            data.to_excel(writer, sheet_name=symbol)
-                            
-            elif format.lower() == 'parquet':
-                if len(symbols_to_save) == 1:
-                    data.to_parquet(filepath)
+                    raise ValueError(f"Unsupported format: {format}")
+
+            else:  # Save multiple symbols
+                base, ext = os.path.splitext(filepath)
+
+                if format.lower() == 'csv':
+                    for symbol in symbols_to_save:
+                        symbol_path = f"{base}_{symbol}.csv"
+                        self.data[symbol].to_csv(symbol_path, index=False)
+
+                elif format.lower() == 'excel':
+                    with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+                        for symbol in symbols_to_save:
+                            self.data[symbol].to_excel(writer, sheet_name=symbol, index=False)
+
+                elif format.lower() == 'parquet':
+                    for symbol in symbols_to_save:
+                        symbol_path = f"{base}_{symbol}.parquet"
+                        self.data[symbol].to_parquet(symbol_path, index=False)
+
                 else:
-                    for symbol, data in combined_data.items():
-                        symbol_path = filepath.replace('.parquet', f'_{symbol}.parquet')
-                        data.to_parquet(symbol_path)
-            
-            logging.info(f"Data saved to {filepath}")
-            
+                    raise ValueError(f"Unsupported format: {format}")
+
+            logging.info(f"Data saved successfully to {filepath}")
+
         except Exception as e:
             logging.error(f"Error saving data: {str(e)}")
             raise
+
 
     def _clean_data(self, data: pd.DataFrame, symbol: str) -> pd.DataFrame:
         """
@@ -444,7 +457,7 @@ class YFinanceDataHandler:
         
         # Forward fill minor gaps (up to 5 days for daily data)
         if not data.empty:
-            data = data.fillna(method='ffill', limit=5)
+            data = data.ffill()
         
         # Log data quality issues
         missing_values = data.isnull().sum().sum()
