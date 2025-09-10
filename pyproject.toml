@@ -4,14 +4,23 @@ version = "0.1.0"
 description = "A package for processing financial data"
 authors = [{ name = "Luigi", email = "luigi@example.com" }]
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "pandas>=1.5",
-    "numpy>=1.23",
-    "requests>=2.28",
-    "yfinance>=0.2"
+    "openpyxl (>=3.1.5,<4.0.0)",
+    "requests (>=2.32.5,<3.0.0)",
+    "numpy (>=2.3.2,<3.0.0)",
+    "yfinance (>=0.2.65,<0.3.0)",
+    "datetime (>=5.5,<6.0)",
+    "logging (>=0.4.9.6,<0.5.0.0)",
+    "pathlib (>=1.0.1,<2.0.0)",
+    "pyarrow (>=21.0.0,<22.0.0)",
+    "fastparquet (>=2024.11.0,<2025.0.0)"
 ]
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
