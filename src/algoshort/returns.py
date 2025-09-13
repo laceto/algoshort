@@ -57,7 +57,6 @@ class ReturnsCalculator:
         Args:
             df (pd.DataFrame): DataFrame containing OHLC data and the regime signal column.
             signal (str): Name of the signal column (e.g., 'bo_5', 'tt_52', 'sma_358').
-            fast (int): Window for stop-loss rolling min/max calculations. Defaults to 20.
             relative (bool): If True, use relative OHLC columns ('r_close', etc.); else absolute ('close', etc.). Defaults to False.
             inplace (bool): If True, modify input DataFrame; else return a new one. Defaults to False.
 
@@ -73,8 +72,7 @@ class ReturnsCalculator:
 
         Raises:
             KeyError: If required columns ('close'/'r_close', 'high'/'r_high', 'low'/'r_low', signal) are missing.
-            ValueError: If DataFrame is empty, fast window is invalid, or data types are non-numeric.
-            IndexError: If DataFrame length is less than fast window.
+            ValueError: If DataFrame is empty,  or data types are non-numeric.
         """
         try:
             # Validate inputs
