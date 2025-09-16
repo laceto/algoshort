@@ -1,14 +1,11 @@
-
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from typing import Union, List, Dict, Optional, Tuple
+from typing import Union, List, Dict, Optional, Tuple, Literal
 import logging
 import warnings
 from pathlib import Path
-from algoshort.utils import relative
-import os
 
 class YFinanceDataHandler:
     """
@@ -22,15 +19,16 @@ class YFinanceDataHandler:
         data (Dict[str, pd.DataFrame]): Dictionary storing data for each symbol
         period_map (Dict[str, str]): Mapping of common period names to yfinance periods
         interval_map (Dict[str, str]): Mapping of common interval names to yfinance intervals
+        logger: Class-specific logger instance
     
     Example:
         >>> handler = YFinanceDataHandler()
         >>> handler.download_data('AAPL', period='1y')
         >>> data = handler.get_data('AAPL')
-        >>> handler.calculate_relative_prices('AAPL', benchmark_symbol='^GSPC')
     """
     
-    def __init__(self, cache_dir: Optional[str] = None, enable_logging: bool = True, chunk_size: int = 50):
+    def __init__(self, cache_dir: Optional[str] = None, enable_logging: bool = True, 
+                 chunk_size: int = 50, log_level: int = logging.INFO):
         """
         Initialize the YFinanceDataHandler.
         
@@ -38,20 +36,25 @@ class YFinanceDataHandler:
             cache_dir (str, optional): Directory to cache downloaded data
             enable_logging (bool): Enable logging for operations
             chunk_size (int): Maximum symbols per download chunk (default: 50)
+            log_level (int): Logging level (default: logging.INFO)
         """
         self.symbols = []
         self.data = {}
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.chunk_size = max(1, chunk_size)  # Ensure at least 1
         
+        # Setup class-specific logger
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        if enable_logging:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+            self.logger.setLevel(log_level)
+        
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             
-        # Setup logging
-        if enable_logging:
-            logging.basicConfig(level=logging.INFO, 
-                              format='%(asctime)s - %(levelname)s - %(message)s')
-        
         # Common period mappings for user convenience
         self.period_map = {
             '1d': '1d', '5d': '5d', '1mo': '1mo', '3mo': '3mo', '6mo': '6mo',
@@ -71,49 +74,6 @@ class YFinanceDataHandler:
             'minute': '1m', 'hourly': '1h', 'daily': '1d', 'weekly': '1wk', 'monthly': '1mo'
         }
 
-    def _create_chunks(self, symbols: List[str]) -> List[List[str]]:
-        """
-        Split symbols into chunks for efficient downloading.
-        
-        Args:
-            symbols (List[str]): List of symbols to chunk
-            
-        Returns:
-            List[List[str]]: List of symbol chunks
-        """
-        chunks = []
-        for i in range(0, len(symbols), self.chunk_size):
-            chunk = symbols[i:i + self.chunk_size]
-            chunks.append(chunk)
-        
-        return chunks
-
-    def _load_from_cache(self, symbol: str, period: str, interval: str) -> Optional[pd.DataFrame]:
-        """
-        Load data from cache if available and valid.
-        
-        Args:
-            symbol (str): Symbol to load
-            period (str): Period used for caching
-            interval (str): Interval used for caching
-            
-        Returns:
-            pd.DataFrame or None: Cached data if available, None otherwise
-        """
-        if not self.cache_dir:
-            return None
-            
-        cache_file = self.cache_dir / f"{symbol}_{period}_{interval}.parquet"
-        
-        if cache_file.exists():
-            try:
-                cached_data = pd.read_parquet(cache_file)
-                logging.info(f"Loaded {symbol} from cache")
-                return cached_data
-            except Exception as e:
-                logging.warning(f"Failed to load cache for {symbol}: {e}")
-                
-        return None 
     def download_data(self,
                      symbols: Union[str, List[str]], 
                      period: str = '1y',
@@ -123,8 +83,7 @@ class YFinanceDataHandler:
                      auto_adjust: bool = True,
                      prepost: bool = False,
                      threads: bool = True,
-                     use_cache: bool = True,
-                     cache_only_new: bool = True) -> Dict[str, pd.DataFrame]:
+                     use_cache: bool = True) -> Dict[str, pd.DataFrame]:
         """
         Download financial data for one or more symbols with chunking and caching strategy.
         
@@ -138,197 +97,43 @@ class YFinanceDataHandler:
             prepost (bool): Include pre/post market data
             threads (bool): Use threading for multiple downloads
             use_cache (bool): Whether to use cached data if available
-            cache_only_new (bool): Only cache newly downloaded data (not loaded from cache)
             
         Returns:
             Dict[str, pd.DataFrame]: Dictionary with symbol as key and DataFrame as value
+            
+        Raises:
+            ValueError: If invalid period/interval or no data downloaded
+            TypeError: If inputs are not of expected types
         """
         
         try:
-            # Handle single symbol input
-            if isinstance(symbols, str):
-                symbols = [symbols]
+            # Input validation and preprocessing
+            symbols_list = self._preprocess_symbols(symbols)
+            period, interval = self._validate_and_map_params(period, interval)
             
-            # Validate and map periods/intervals
-            period = self.period_map.get(period, period)
-            interval = self.interval_map.get(interval, interval)
+            # Separate symbols based on cache availability
+            symbols_to_download, symbols_from_cache = self._separate_cached_symbols(
+                symbols_list, period, interval, use_cache
+            )
             
-            # Validate period and interval combination
-            self._validate_period_interval(period, interval)
-            
-            # Separate symbols that need downloading vs those in cache
-            symbols_to_download = []
-            symbols_from_cache = []
-            
-            if use_cache and self.cache_dir:
-                for symbol in symbols:
-                    cached_data = self._load_from_cache(symbol, period, interval)
-                    if cached_data is not None:
-                        # Process cached data
-                        cleaned_data = self._clean_data(cached_data, symbol)
-                        self.data[symbol] = cleaned_data
-                        if symbol not in self.symbols:
-                            self.symbols.append(symbol)
-                        symbols_from_cache.append(symbol)
-                    else:
-                        symbols_to_download.append(symbol)
-            else:
-                symbols_to_download = symbols
-            
-            logging.info(f"Cache hits: {len(symbols_from_cache)}, Downloads needed: {len(symbols_to_download)}")
+            self.logger.info(f"Cache hits: {len(symbols_from_cache)}, Downloads needed: {len(symbols_to_download)}")
             
             # Download only symbols not in cache
             if symbols_to_download:
-                self._download_symbols_chunked(
+                self._process_downloads(
                     symbols_to_download, period, interval, start, end, 
-                    auto_adjust, prepost, threads, cache_only_new
+                    auto_adjust, prepost, threads
                 )
             
-            # Return all data (cached + downloaded)
-            return {symbol: self.data[symbol] for symbol in symbols if symbol in self.data}
+            # Return all successfully loaded data
+            successful_symbols = [s for s in symbols_list if s in self.data]
+            self.logger.info(f"Successfully processed {len(successful_symbols)}/{len(symbols_list)} symbols")
+            
+            return {symbol: self.data[symbol] for symbol in successful_symbols}
             
         except Exception as e:
-            logging.error(f"Error in download_data: {str(e)}")
+            self.logger.error(f"Error in download_data: {str(e)}")
             raise
-
-    def _download_symbols_chunked(self, 
-                                 symbols: List[str], 
-                                 period: str, 
-                                 interval: str,
-                                 start: Optional[str], 
-                                 end: Optional[str],
-                                 auto_adjust: bool, 
-                                 prepost: bool, 
-                                 threads: bool,
-                                 cache_only_new: bool):
-        """
-        Download symbols in chunks to handle large requests efficiently.
-        """
-        
-        # Create chunks
-        chunks = self._create_chunks(symbols)
-        total_chunks = len(chunks)
-        
-        logging.info(f"Downloading {len(symbols)} symbols in {total_chunks} chunks of {self.chunk_size}")
-        
-        for chunk_idx, chunk in enumerate(chunks, 1):
-            logging.info(f"Processing chunk {chunk_idx}/{total_chunks}: {chunk}")
-            
-            try:
-                if len(chunk) == 1:
-                    # Single symbol download
-                    self._download_single_symbol(
-                        chunk[0], period, interval, start, end, 
-                        auto_adjust, prepost, cache_only_new
-                    )
-                else:
-                    # Multiple symbols download
-                    self._download_multiple_symbols(
-                        chunk, period, interval, start, end,
-                        auto_adjust, prepost, threads, cache_only_new
-                    )
-                    
-            except Exception as e:
-                logging.error(f"Error downloading chunk {chunk_idx}: {e}")
-                # Continue with next chunk
-                continue
-
-    def _download_single_symbol(self, 
-                               symbol: str, 
-                               period: str, 
-                               interval: str,
-                               start: Optional[str], 
-                               end: Optional[str], 
-                               auto_adjust: bool, 
-                               prepost: bool,
-                               cache_only_new: bool):
-        """Download data for a single symbol."""
-        
-        ticker = yf.Ticker(symbol)
-        
-        if start and end:
-            data = ticker.history(start=start, end=end, interval=interval, 
-                                auto_adjust=auto_adjust, prepost=prepost)
-        else:
-            data = ticker.history(period=period, interval=interval,
-                                auto_adjust=auto_adjust, prepost=prepost)
-        
-        if data.empty:
-            logging.warning(f"No data found for symbol {symbol}")
-            return
-        
-        # Clean and store data
-        cleaned_data = self._clean_data(data, symbol)
-        self.data[symbol] = cleaned_data
-        
-        if symbol not in self.symbols:
-            self.symbols.append(symbol)
-        
-        # Cache only newly downloaded data
-        if cache_only_new and self.cache_dir:
-            self._cache_single_symbol(symbol, cleaned_data, period, interval)
-
-    def _download_multiple_symbols(self, 
-                                  symbols: List[str], 
-                                  period: str, 
-                                  interval: str,
-                                  start: Optional[str], 
-                                  end: Optional[str], 
-                                  auto_adjust: bool, 
-                                  prepost: bool, 
-                                  threads: bool,
-                                  cache_only_new: bool):
-        """Download data for multiple symbols."""
-        
-        if start and end:
-            data = yf.download(symbols, start=start, end=end, interval=interval,
-                             auto_adjust=auto_adjust, prepost=prepost, 
-                             threads=threads, group_by='ticker')
-        else:
-            data = yf.download(symbols, period=period, interval=interval,
-                             auto_adjust=auto_adjust, prepost=prepost,
-                             threads=threads, group_by='ticker')
-        
-        if data.empty:
-            logging.warning(f"No data found for symbols {symbols}")
-            return
-        
-        # Process each symbol
-        for symbol in symbols:
-            try:
-                if len(symbols) > 1:
-                    if hasattr(data.columns, 'levels') and symbol in data.columns.levels[0]:
-                        symbol_data = data[symbol]
-                    else:
-                        # Handle case where only one symbol returned data
-                        symbol_data = data
-                else:
-                    symbol_data = data
-                
-                if not symbol_data.empty:
-                    cleaned_data = self._clean_data(symbol_data, symbol)
-                    self.data[symbol] = cleaned_data
-                    
-                    if symbol not in self.symbols:
-                        self.symbols.append(symbol)
-                    
-                    # Cache only newly downloaded data
-                    if cache_only_new and self.cache_dir:
-                        self._cache_single_symbol(symbol, cleaned_data, period, interval)
-                else:
-                    logging.warning(f"No data available for {symbol}")
-                    
-            except Exception as e:
-                logging.error(f"Error processing {symbol}: {e}")
-
-    def _cache_single_symbol(self, symbol: str, data: pd.DataFrame, period: str, interval: str):
-        """Cache data for a single symbol."""
-        try:
-            cache_file = self.cache_dir / f"{symbol}_{period}_{interval}.parquet"
-            data.to_parquet(cache_file)
-            logging.info(f"Cached data for {symbol}")
-        except Exception as e:
-            logging.warning(f"Failed to cache {symbol}: {e}")
 
     def get_data(self, symbol: str, columns: Optional[List[str]] = None) -> pd.DataFrame:
         """
@@ -342,156 +147,134 @@ class YFinanceDataHandler:
             pd.DataFrame: Stock data for the symbol
             
         Raises:
-            KeyError: If symbol not found in stored data
+            KeyError: If symbol data not found in handler
         """
         
         try:
             if symbol not in self.data:
-                raise KeyError(f"Symbol {symbol} not found. Available symbols: {self.symbols}")
+                available = list(self.data.keys())
+                raise KeyError(
+                    f"Data for symbol '{symbol}' not found in handler. "
+                    f"Available symbols: {available}. "
+                    f"Use download_data('{symbol}') first."
+                )
             
             data = self.data[symbol].copy()
             
             if columns:
                 missing_cols = [col for col in columns if col not in data.columns]
                 if missing_cols:
-                    logging.warning(f"Columns {missing_cols} not found in {symbol} data")
+                    self.logger.warning(f"Columns {missing_cols} not found in {symbol} data")
                 available_cols = [col for col in columns if col in data.columns]
-                data = data[available_cols]
+                if available_cols:
+                    data = data[available_cols]
+                else:
+                    # Return empty DataFrame with requested columns
+                    return pd.DataFrame(columns=columns)
             
             return data
             
         except Exception as e:
-            logging.error(f"Error retrieving data for {symbol}: {str(e)}")
+            self.logger.error(f"Error retrieving data for {symbol}: {str(e)}")
             raise
 
     def get_ohlc_data(self, symbol: str) -> pd.DataFrame:
         """
-        Get OHLC data in format suitable for the relative() function.
+        Get OHLC data in format suitable for analysis functions.
         
         Args:
             symbol (str): Stock symbol
             
         Returns:
             pd.DataFrame: DataFrame with date, open, high, low, close columns
+            
+        Raises:
+            KeyError: If symbol data not found
+            ValueError: If required OHLC columns are missing
         """
         
         try:
-            data = self.get_data(symbol, ['open', 'high', 'low', 'close'])
+            required_cols = ['open', 'high', 'low', 'close']
+            data = self.get_data(symbol, required_cols)
+            
+            if data.empty:
+                raise ValueError(f"No OHLC data available for {symbol}")
+            
+            # Reset index to get date column
             data = data.reset_index()
+            
+            # Ensure proper column naming
             data.columns = data.columns.str.lower()
             
-            # Ensure date column is named 'date'
-            if 'date' not in data.columns and data.index.name in ['Date', 'Datetime']:
-                data = data.reset_index()
-                data.rename(columns={data.columns[0]: 'date'}, inplace=True)
+            # Rename index column to 'date' if needed
+            if data.columns[0].lower() in ['date', 'datetime'] or 'date' not in data.columns:
+                data = data.rename(columns={data.columns[0]: 'date'})
             
             return data
             
         except Exception as e:
-            logging.error(f"Error preparing OHLC data for {symbol}: {str(e)}")
+            self.logger.error(f"Error preparing OHLC data for {symbol}: {str(e)}")
             raise
 
-    def calculate_relative_prices(self, 
-                                symbol: str, 
-                                benchmark_symbol: str = '^GSPC',
-                                benchmark_column: str = 'close',
-                                digits: int = 4,
-                                rebase: bool = True) -> pd.DataFrame:
-        """
-        Calculate relative prices using the relative() function.
-        
-        Args:
-            symbol (str): Primary symbol for analysis
-            benchmark_symbol (str): Benchmark symbol (default: S&P 500)
-            benchmark_column (str): Column to use from benchmark data
-            digits (int): Decimal places for rounding
-            rebase (bool): Whether to rebase benchmark to 1.0
+    def get_combined_data(self, symbols: List[str], columns: Union[str, List[str], None] = None) -> pd.DataFrame:
+            """
+            Get data for multiple symbols in row-bound format (long format).
             
-        Returns:
-            pd.DataFrame: DataFrame with relative prices
-            
-        Raises:
-            ValueError: If symbols not available or calculation fails
-        """
-        
-        try:
-            # Ensure both symbols are available
-            if symbol not in self.data:
-                logging.info(f"Downloading data for {symbol}")
-                self.download_data(symbol)
-            
-            if benchmark_symbol not in self.data:
-                logging.info(f"Downloading benchmark data for {benchmark_symbol}")
-                self.download_data(benchmark_symbol)
-            
-            # Prepare data for relative calculation
-            main_data = self.get_ohlc_data(symbol)
-            benchmark_data = self.get_ohlc_data(benchmark_symbol).reset_index()[['date', benchmark_column]]
-            
-            # Ensure proper column naming
-            if 'date' not in benchmark_data.columns:
-                benchmark_data = benchmark_data.reset_index()
-                benchmark_data.rename(columns={benchmark_data.columns[0]: 'date'}, inplace=True)
-             
-            result = relative(
-                df=main_data,
-                _o='open', _h='high', _l='low', _c='close',
-                bm_df=benchmark_data,
-                bm_col=benchmark_column,
-                dgt=digits,
-                rebase=rebase
-            )
-            
-            return result
-            
-        except Exception as e:
-            logging.error(f"Error calculating relative prices: {str(e)}")
-            raise
+            This method will NOT download missing data; it only works with symbols
+            that have already been loaded into memory.
 
-    def get_combined_data(self, symbols: List[str]) -> pd.DataFrame:
-        """
-        Get complete data for multiple symbols in a single DataFrame with row-bound structure.
-        
-        Args:
-            symbols (List[str]): List of symbols
-            
-        Returns:
-            pd.DataFrame: DataFrame with all columns plus 'symbol' column - row-bound format
-        """
-        
-        try:
+            Args:
+                symbols (List[str]): List of symbols
+                columns (Union[str, List[str], None]): Specific column(s) to extract.
+                                                    If None, returns the entire DataFrame.
+
+            Returns:
+                pd.DataFrame: DataFrame with a 'symbol' column and the requested data.
+                            Returns an empty DataFrame if no data is available.
+            """
             combined_rows = []
-            
+
+            if isinstance(columns, str):
+                columns = [columns]
+
             for symbol in symbols:
+                # Check if the symbol is in memory before proceeding
                 if symbol not in self.data:
-                    logging.info(f"Downloading missing data for {symbol}")
-                    self.download_data(symbol)
-                
-                data = self.get_data(symbol)  # Get all data, no column filtering
-                if not data.empty:
-                    # Convert to row format with all columns
-                    symbol_data = data.reset_index()
-                    symbol_data['symbol'] = symbol
-                    # Reorder columns to put 'symbol' after 'Date'
-                    cols = ['Date', 'symbol'] + [col for col in symbol_data.columns if col not in ['Date', 'symbol']]
-                    symbol_data = symbol_data[cols]
-                    combined_rows.append(symbol_data)
-            
+                    self.logger.warning(f"Skipping '{symbol}': data not found in memory.")
+                    continue
+
+                try:
+                    data = self.get_data(symbol, columns)
+                    if not data.empty:
+                        symbol_data = data.copy().reset_index()
+                        symbol_data['symbol'] = symbol
+                        
+                        # Ensure 'Date' column is present before reordering
+                        if 'Date' in symbol_data.columns:
+                            cols = ['Date', 'symbol'] + [col for col in symbol_data.columns if col not in ['Date', 'symbol']]
+                            symbol_data = symbol_data[cols]
+                        else:
+                            self.logger.warning(f"Skipping {symbol} due to missing 'Date' column.")
+                            continue
+
+                        combined_rows.append(symbol_data)
+                    else:
+                        self.logger.warning(f"No data available for {symbol}")
+
+                except Exception as e:
+                    self.logger.error(f"Error processing {symbol}: {e}")
+                    continue
+
             if combined_rows:
                 result = pd.concat(combined_rows, ignore_index=True)
-                result = result.sort_values(['Date', 'symbol']).reset_index(drop=True)
-                return result
+                return result.sort_values(['Date', 'symbol']).reset_index(drop=True)
             else:
-                # Return empty DataFrame with expected structure (assuming common OHLCV columns)
-                return pd.DataFrame(columns=['Date', 'symbol', 'open', 'high', 'low', 'close', 'volume'])
-                
-        except Exception as e:
-            logging.error(f"Error combining symbols data: {str(e)}")
-            raise
+                # Return an empty DataFrame with a consistent schema
+                return pd.DataFrame(columns=['Date', 'symbol'])
 
     def get_multiple_symbols_data(self, symbols: List[str], column: str = 'close') -> pd.DataFrame:
         """
-        Get data for multiple symbols in a single DataFrame (wide format).
+        Get data for multiple symbols in wide format (each symbol as a column).
         
         Args:
             symbols (List[str]): List of symbols
@@ -499,19 +282,42 @@ class YFinanceDataHandler:
             
         Returns:
             pd.DataFrame: DataFrame with dates and symbol columns (wide format)
+            
+        Raises:
+            ValueError: If column is not valid or no symbols processed successfully
         """
+        
+        valid_columns = ['open', 'high', 'low', 'close', 'volume']
+        if column not in valid_columns:
+            raise ValueError(f"Column '{column}' not valid. Must be one of: {valid_columns}")
         
         try:
             dfs = []
+            successful_symbols = []
             
             for symbol in symbols:
-                if symbol not in self.data:
-                    logging.info(f"Downloading missing data for {symbol}")
-                    self.download_data(symbol)
-                
-                data = self.get_data(symbol, [column]).reset_index()
-                data.columns = ['date', symbol]
-                dfs.append(data)
+                try:
+                    # if symbol not in self.data:
+                    #     self.logger.info(f"Downloading missing data for {symbol}")
+                    #     self.download_data(symbol)
+                    
+                    data = self.get_data(symbol, [column])
+                    if not data.empty:
+                        data_reset = data.reset_index()
+                        # Use consistent column naming
+                        date_col = data_reset.columns[0]
+                        data_reset.columns = ['date', symbol]
+                        dfs.append(data_reset)
+                        successful_symbols.append(symbol)
+                    else:
+                        self.logger.warning(f"No data available for {symbol}")
+                        
+                except Exception as e:
+                    self.logger.warning(f"Error processing {symbol}: {e}")
+                    continue
+            
+            if not dfs:
+                raise ValueError("No data could be retrieved for any of the specified symbols")
             
             # Merge all dataframes
             result = dfs[0]
@@ -519,11 +325,15 @@ class YFinanceDataHandler:
                 result = pd.merge(result, df, on='date', how='outer')
             
             result = result.sort_values('date').reset_index(drop=True)
+            self.logger.info(f"Successfully combined data for symbols: {successful_symbols}")
+            
             return result
             
         except Exception as e:
-            logging.error(f"Error combining multiple symbols: {str(e)}")
+            self.logger.error(f"Error combining multiple symbols: {str(e)}")
             raise
+
+    def get_info(self, symbol: str) -> Dict:
         """
         Get company information for a symbol.
         
@@ -531,103 +341,399 @@ class YFinanceDataHandler:
             symbol (str): Stock symbol
             
         Returns:
-            Dict: Company information
+            Dict: Company information from yfinance
+            
+        Raises:
+            Exception: If unable to retrieve information
         """
         
         try:
             ticker = yf.Ticker(symbol)
-            return ticker.info
+            info = ticker.info
+            self.logger.info(f"Retrieved company info for {symbol}")
+            return info
             
         except Exception as e:
-            logging.error(f"Error getting info for {symbol}: {str(e)}")
+            self.logger.error(f"Error getting info for {symbol}: {str(e)}")
             return {}
+
+
 
     def list_available_data(self) -> Dict[str, Dict]:
         """
         List all available data with summary statistics.
         
         Returns:
-            Dict: Summary of available data
+            Dict: Summary of available data for each symbol
         """
         
         summary = {}
         
         for symbol in self.symbols:
-            data = self.data[symbol]
-            summary[symbol] = {
-                'rows': len(data),
-                'columns': list(data.columns),
-                'date_range': f"{data.index.min()} to {data.index.max()}",
-                'missing_values': data.isnull().sum().sum()
-            }
+            if symbol in self.data:
+                data = self.data[symbol]
+                
+                # Ensure index is datetime for min/max operations
+                try:
+                    if hasattr(data.index, 'min') and hasattr(data.index, 'max'):
+                        date_min = pd.to_datetime(data.index.min()).strftime('%Y-%m-%d')
+                        date_max = pd.to_datetime(data.index.max()).strftime('%Y-%m-%d')
+                        date_range = f"{date_min} to {date_max}"
+                    else:
+                        date_range = "Invalid date range"
+                except Exception:
+                    date_range = "Unable to determine date range"
+                
+                summary[symbol] = {
+                    'rows': len(data),
+                    'columns': list(data.columns),
+                    'date_range': date_range,
+                    'missing_values': data.isnull().sum().sum()
+                }
         
         return summary
 
-    def save_data(self, filepath: str, symbols: Optional[List[str]] = None, format: str = 'csv'):
+    def list_cached_data(self) -> Dict[str, Dict]:
         """
-        Save data to file.
+        Lists all data files present in the cache directory.
+
+        Returns:
+            Dict: A dictionary with filenames as keys and file details as values.
+        """
+        if not self.cache_dir or not self.cache_dir.exists():
+            self.logger.warning("Cache directory does not exist.")
+            return {}
+
+        cached_files = {}
+        for file_path in self.cache_dir.iterdir():
+            if file_path.suffix == '.parquet':
+                try:
+                    # Assuming the format is 'SYMBOL_PERIOD_INTERVAL.parquet'
+                    parts = file_path.stem.split('_')
+                    if len(parts) >= 3:
+                        symbol = parts[0]
+                        period = parts[1]
+                        interval = parts[2]
+                    else:
+                        symbol = file_path.stem
+                        period = 'unknown'
+                        interval = 'unknown'
+
+                    file_size_kb = file_path.stat().st_size / 1024
+
+                    cached_files[file_path.name] = {
+                        'symbol': symbol,
+                        'period': period,
+                        'interval': interval,
+                        'size_kb': round(file_size_kb, 2),
+                        'last_modified': datetime.fromtimestamp(file_path.stat().st_mtime)
+                    }
+                except Exception as e:
+                    self.logger.error(f"Failed to process cached file {file_path.name}: {e}")
+                    
+        return cached_files
+
+    def list_cached_symbols(self) -> list[str]:
+            """
+            Scans the cache directory and returns a list of all unique cached symbols.
+
+            Returns:
+                list[str]: A list of unique symbols found in the cache.
+            """
+            if not self.cache_dir or not self.cache_dir.exists():
+                self.logger.warning("Cache directory does not exist or is not configured.")
+                return []
+
+            symbols_in_cache = set()
+            for file_path in self.cache_dir.iterdir():
+                if file_path.suffix == '.parquet':
+                    try:
+                        # Assuming the filename format is "SYMBOL_PERIOD_INTERVAL.parquet"
+                        symbol = file_path.stem.split('_')[0]
+                        symbols_in_cache.add(symbol)
+                    except IndexError:
+                        self.logger.warning(f"Skipping malformed filename in cache: {file_path.name}")
+            return sorted(list(symbols_in_cache))
+    
+    def save_data(self, 
+                  filepath: str, 
+                  symbols: Optional[List[str]] = None, 
+                  format: str = 'csv',
+                  multi_symbol_strategy: Literal['separate_files', 'single_file', 'excel_sheets'] = 'separate_files',
+                  combine_column: str = 'close') -> None:
+        """
+        Save data to file with flexible options for multiple symbols.
         
         Args:
-            filepath (str): Path to save file
-            symbols (List[str], optional): Specific symbols to save
+            filepath (str): Base path for saving files
+            symbols (List[str], optional): Specific symbols to save (default: all)
             format (str): File format ('csv', 'excel', 'parquet')
+            multi_symbol_strategy (str): How to handle multiple symbols:
+                - 'separate_files': Create separate file for each symbol
+                - 'single_file': Combine all symbols in one file (row-bound format)
+                - 'excel_sheets': Save as Excel with separate sheets per symbol
+            combine_column (str): Column to use when combining symbols in single file
+            
+        Raises:
+            ValueError: If invalid format or strategy specified
+            FileNotFoundError: If unable to create output directory
         """
+        
+        valid_formats = ['csv', 'excel', 'parquet']
+        valid_strategies = ['separate_files', 'single_file', 'excel_sheets']
+        
+        if format not in valid_formats:
+            raise ValueError(f"Format must be one of: {valid_formats}")
+        
+        if multi_symbol_strategy not in valid_strategies:
+            raise ValueError(f"Multi-symbol strategy must be one of: {valid_strategies}")
         
         try:
             symbols_to_save = symbols or self.symbols
+            symbols_to_save = [s for s in symbols_to_save if s in self.data]
+            
+            if not symbols_to_save:
+                raise ValueError("No symbols with data available to save")
+            
+            # Create output directory if needed
+            output_path = Path(filepath)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             
             if len(symbols_to_save) == 1:
-                data = self.data[symbols_to_save[0]]
+                # Single symbol - straightforward save
+                symbol = symbols_to_save[0]
+                data = self.data[symbol]
+                self._save_single_file(data, filepath, format)
+                self.logger.info(f"Saved data for {symbol} to {filepath}")
+                
             else:
-                # Combine multiple symbols
-                combined_data = {}
-                for symbol in symbols_to_save:
-                    if symbol in self.data:
-                        combined_data[symbol] = self.data[symbol]
-            
-            if format.lower() == 'csv':
-                if len(symbols_to_save) == 1:
-                    data.to_csv(filepath)
-                else:
-                    # Save each symbol to separate sheet or file
-                    for symbol, data in combined_data.items():
-                        symbol_path = filepath.replace('.csv', f'_{symbol}.csv')
-                        data.to_csv(symbol_path)
-                        
-            elif format.lower() == 'excel':
-                with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
-                    if len(symbols_to_save) == 1:
-                        data.to_excel(writer, sheet_name=symbols_to_save[0])
-                    else:
-                        for symbol, data in combined_data.items():
-                            data.to_excel(writer, sheet_name=symbol)
-                            
-            elif format.lower() == 'parquet':
-                if len(symbols_to_save) == 1:
-                    data.to_parquet(filepath)
-                else:
-                    for symbol, data in combined_data.items():
-                        symbol_path = filepath.replace('.parquet', f'_{symbol}.parquet')
-                        data.to_parquet(symbol_path)
-            
-            logging.info(f"Data saved to {filepath}")
-            
+                # Multiple symbols - use specified strategy
+                if multi_symbol_strategy == 'separate_files':
+                    self._save_separate_files(symbols_to_save, filepath, format)
+                    
+                elif multi_symbol_strategy == 'single_file':
+                    combined_data = self.get_combined_data(symbols_to_save, combine_column)
+                    self._save_single_file(combined_data, filepath, format)
+                    self.logger.info(f"Saved combined data for {len(symbols_to_save)} symbols to {filepath}")
+                    
+                elif multi_symbol_strategy == 'excel_sheets':
+                    if format != 'excel':
+                        self.logger.warning("Forcing format to 'excel' for excel_sheets strategy")
+                        format = 'excel'
+                    self._save_excel_sheets(symbols_to_save, filepath)
+                    
         except Exception as e:
-            logging.error(f"Error saving data: {str(e)}")
+            self.logger.error(f"Error saving data: {str(e)}")
             raise
 
-    def _clean_data(self, data: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    def clear_cache(self, symbols: Optional[List[str]] = None) -> int:
         """
-        Clean and prepare downloaded data.
+        Clear cached files for specified symbols or all symbols.
         
         Args:
-            data (pd.DataFrame): Raw data from yfinance
-            symbol (str): Symbol name for logging
+            symbols (List[str], optional): Symbols to clear from cache (default: all)
             
         Returns:
-            pd.DataFrame: Cleaned data
+            int: Number of files removed
+            
+        Raises:
+            OSError: If unable to remove cache files
         """
         
+        if not self.cache_dir or not self.cache_dir.exists():
+            self.logger.warning("No cache directory found")
+            return 0
+        
+        try:
+            removed_count = 0
+            
+            if symbols is None:
+                # Remove all cache files
+                for cache_file in self.cache_dir.glob("*.parquet"):
+                    cache_file.unlink()
+                    removed_count += 1
+                    self.logger.debug(f"Removed cache file: {cache_file.name}")
+            else:
+                # Remove specific symbols
+                for symbol in symbols:
+                    pattern = f"{symbol}_*.parquet"
+                    for cache_file in self.cache_dir.glob(pattern):
+                        cache_file.unlink()
+                        removed_count += 1
+                        self.logger.debug(f"Removed cache file: {cache_file.name}")
+            
+            self.logger.info(f"Cleared {removed_count} cache files")
+            return removed_count
+            
+        except Exception as e:
+            self.logger.error(f"Error clearing cache: {str(e)}")
+            raise
+
+    # Private helper methods
+    
+    def _preprocess_symbols(self, symbols: Union[str, List[str]]) -> List[str]:
+        """Preprocess and validate symbol inputs."""
+        if isinstance(symbols, str):
+            return [symbols.upper()]
+        elif isinstance(symbols, list):
+            return [s.upper() for s in symbols if isinstance(s, str)]
+        else:
+            raise TypeError("Symbols must be a string or list of strings")
+
+    def _validate_and_map_params(self, period: str, interval: str) -> Tuple[str, str]:
+        """Validate and map period/interval parameters."""
+        period = self.period_map.get(period, period)
+        interval = self.interval_map.get(interval, interval)
+        
+        self._validate_period_interval(period, interval)
+        return period, interval
+
+    def _separate_cached_symbols(self, symbols: List[str], period: str, interval: str, 
+                                use_cache: bool) -> Tuple[List[str], List[str]]:
+        """Separate symbols into those needing download vs those available in cache."""
+        symbols_to_download = []
+        symbols_from_cache = []
+        
+        if use_cache and self.cache_dir:
+            for symbol in symbols:
+                cached_data = self._load_from_cache(symbol, period, interval)
+                if cached_data is not None:
+                    cleaned_data = self._clean_data(cached_data, symbol)
+                    self.data[symbol] = cleaned_data
+                    if symbol not in self.symbols:
+                        self.symbols.append(symbol)
+                    symbols_from_cache.append(symbol)
+                else:
+                    symbols_to_download.append(symbol)
+        else:
+            symbols_to_download = symbols
+        
+        return symbols_to_download, symbols_from_cache
+
+    def _process_downloads(self, symbols: List[str], period: str, interval: str,
+                          start: Optional[str], end: Optional[str], auto_adjust: bool,
+                          prepost: bool, threads: bool) -> None:
+        """Process downloads using chunking strategy."""
+        chunks = self._create_chunks(symbols)
+        total_chunks = len(chunks)
+        
+        self.logger.info(f"Downloading {len(symbols)} symbols in {total_chunks} chunks of {self.chunk_size}")
+        
+        for chunk_idx, chunk in enumerate(chunks, 1):
+            self.logger.debug(f"Processing chunk {chunk_idx}/{total_chunks}: {chunk}")
+            
+            try:
+                if len(chunk) == 1:
+                    self._download_single_symbol(
+                        chunk[0], period, interval, start, end, auto_adjust, prepost
+                    )
+                else:
+                    self._download_multiple_symbols(
+                        chunk, period, interval, start, end, auto_adjust, prepost, threads
+                    )
+                    
+            except Exception as e:
+                self.logger.error(f"Error downloading chunk {chunk_idx}: {e}")
+                continue
+
+    def _create_chunks(self, symbols: List[str]) -> List[List[str]]:
+        """Split symbols into chunks for efficient downloading."""
+        return [symbols[i:i + self.chunk_size] for i in range(0, len(symbols), self.chunk_size)]
+
+    def _load_from_cache(self, symbol: str, period: str, interval: str) -> Optional[pd.DataFrame]:
+        """Load data from cache if available."""
+        if not self.cache_dir:
+            return None
+            
+        cache_file = self.cache_dir / f"{symbol}_{period}_{interval}.parquet"
+        
+        if cache_file.exists():
+            try:
+                cached_data = pd.read_parquet(cache_file)
+                self.logger.debug(f"Loaded {symbol} from cache")
+                return cached_data
+            except Exception as e:
+                self.logger.warning(f"Failed to load cache for {symbol}: {e}")
+                
+        return None
+
+    def _download_single_symbol(self, symbol: str, period: str, interval: str,
+                               start: Optional[str], end: Optional[str], 
+                               auto_adjust: bool, prepost: bool) -> None:
+        """Download data for a single symbol."""
+        ticker = yf.Ticker(symbol)
+        
+        if start and end:
+            data = ticker.history(start=start, end=end, interval=interval, 
+                                auto_adjust=auto_adjust, prepost=prepost)
+        else:
+            data = ticker.history(period=period, interval=interval,
+                                auto_adjust=auto_adjust, prepost=prepost)
+        
+        if data.empty:
+            self.logger.warning(f"No data found for symbol {symbol}")
+            return
+        
+        # Clean, store, and cache data
+        cleaned_data = self._clean_data(data, symbol)
+        self.data[symbol] = cleaned_data
+        
+        if symbol not in self.symbols:
+            self.symbols.append(symbol)
+        
+        if self.cache_dir:
+            self._cache_single_symbol(symbol, cleaned_data, period, interval)
+
+    def _download_multiple_symbols(self, symbols: List[str], period: str, interval: str,
+                                  start: Optional[str], end: Optional[str], 
+                                  auto_adjust: bool, prepost: bool, threads: bool) -> None:
+        """Download data for multiple symbols."""
+        if start and end:
+            data = yf.download(symbols, start=start, end=end, interval=interval,
+                             auto_adjust=auto_adjust, prepost=prepost, 
+                             threads=threads, group_by='ticker')
+        else:
+            data = yf.download(symbols, period=period, interval=interval,
+                             auto_adjust=auto_adjust, prepost=prepost,
+                             threads=threads, group_by='ticker')
+        
+        if data.empty:
+            self.logger.warning(f"No data found for symbols {symbols}")
+            return
+        
+        # Process each symbol
+        for symbol in symbols:
+            try:
+                symbol_data = self._extract_symbol_data(data, symbol, len(symbols) > 1)
+                
+                if not symbol_data.empty:
+                    cleaned_data = self._clean_data(symbol_data, symbol)
+                    self.data[symbol] = cleaned_data
+                    
+                    if symbol not in self.symbols:
+                        self.symbols.append(symbol)
+                    
+                    if self.cache_dir:
+                        self._cache_single_symbol(symbol, cleaned_data, period, interval)
+                else:
+                    self.logger.warning(f"No data available for {symbol}")
+                    
+            except Exception as e:
+                self.logger.error(f"Error processing {symbol}: {e}")
+
+    def _extract_symbol_data(self, data: pd.DataFrame, symbol: str, multi_symbol: bool) -> pd.DataFrame:
+        """Extract data for a specific symbol from multi-symbol download."""
+        if multi_symbol:
+            if hasattr(data.columns, 'levels') and symbol in data.columns.levels[0]:
+                return data[symbol]
+            else:
+                # Handle case where only one symbol returned data
+                return data
+        else:
+            return data
+
+    def _clean_data(self, data: pd.DataFrame, symbol: str) -> pd.DataFrame:
+        """Clean and prepare downloaded data."""
         # Make column names lowercase and consistent
         data.columns = data.columns.str.lower()
         
@@ -641,56 +747,67 @@ class YFinanceDataHandler:
         # Log data quality issues
         missing_values = data.isnull().sum().sum()
         if missing_values > 0:
-            logging.warning(f"{symbol}: {missing_values} missing values found")
+            self.logger.warning(f"{symbol}: {missing_values} missing values found")
         
         return data
 
-    def _validate_period_interval(self, period: str, interval: str):
-        """
-        Validate period and interval combinations.
-        
-        Args:
-            period (str): Time period
-            interval (str): Data interval
-            
-        Raises:
-            ValueError: If invalid combination
-        """
-        
-        # Define valid combinations
+    def _cache_single_symbol(self, symbol: str, data: pd.DataFrame, period: str, interval: str) -> None:
+        """Cache data for a single symbol."""
+        try:
+            cache_file = self.cache_dir / f"{symbol}_{period}_{interval}.parquet"
+            data.to_parquet(cache_file)
+            self.logger.debug(f"Cached data for {symbol}")
+        except Exception as e:
+            self.logger.warning(f"Failed to cache {symbol}: {e}")
+
+    def _validate_period_interval(self, period: str, interval: str) -> None:
+        """Validate period and interval combinations."""
         intraday_intervals = ['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h']
         intraday_periods = ['1d', '5d', '1mo', '3mo']
         
         if interval in intraday_intervals and period not in intraday_periods:
             raise ValueError(f"Intraday interval {interval} only supports periods: {intraday_periods}")
 
-    def _cache_data(self, symbols: List[str], period: str, interval: str):
-        """
-        Cache downloaded data to disk (deprecated - use cache_only_new in download_data).
+    def _save_single_file(self, data: pd.DataFrame, filepath: str, format: str) -> None:
+        """Save data to a single file."""
+        if format == 'csv':
+            data.to_csv(filepath)
+        elif format == 'excel':
+            data.to_excel(filepath, engine='openpyxl')
+        elif format == 'parquet':
+            data.to_parquet(filepath)
+
+    def _save_separate_files(self, symbols: List[str], filepath: str, format: str) -> None:
+        """Save each symbol to a separate file."""
+        base_path = Path(filepath)
+        base_name = base_path.stem
+        extension = f".{format}" if format != 'excel' else '.xlsx'
         
-        Args:
-            symbols (List[str]): Symbols to cache
-            period (str): Period used for download
-            interval (str): Interval used for download
-        """
+        for symbol in symbols:
+            if symbol in self.data:
+                symbol_path = base_path.parent / f"{base_name}_{symbol}{extension}"
+                self._save_single_file(self.data[symbol], str(symbol_path), format)
+                self.logger.debug(f"Saved {symbol} to {symbol_path}")
         
-        logging.warning("_cache_data is deprecated. Use cache_only_new=True in download_data instead.")
+        self.logger.info(f"Saved {len(symbols)} symbols to separate files")
+
+    def _save_excel_sheets(self, symbols: List[str], filepath: str) -> None:
+        """Save symbols as separate sheets in an Excel file."""
+        if not filepath.endswith('.xlsx'):
+            filepath = filepath.replace(Path(filepath).suffix, '.xlsx')
         
-        try:
-            if not self.cache_dir:
-                return
-            
+        with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
             for symbol in symbols:
                 if symbol in self.data:
-                    self._cache_single_symbol(symbol, self.data[symbol], period, interval)
-                    
-        except Exception as e:
-            logging.warning(f"Failed to cache data: {str(e)}")
+                    # Excel sheet names have character limits and restrictions
+                    sheet_name = symbol.replace(':', '_').replace('/', '_')[:31]
+                    self.data[symbol].to_excel(writer, sheet_name=sheet_name)
+                    self.logger.debug(f"Added {symbol} as sheet '{sheet_name}'")
+        
+        self.logger.info(f"Saved {len(symbols)} symbols as Excel sheets to {filepath}")
 
     def __repr__(self) -> str:
         return f"YFinanceDataHandler(symbols={len(self.symbols)}, cached_data={list(self.data.keys())})"
 
     def __len__(self) -> int:
         return len(self.symbols)
-
- 
