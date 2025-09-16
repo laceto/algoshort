@@ -5,10 +5,6 @@ from algoshort.utils import load_config, extract_signal_name
 from algoshort.returns import ReturnsCalculator
 from algoshort.strategy_metrics import StrategyMetrics
 
-def calculate_relative_prices(df, symbol: str, benchmark: str) -> pd.DataFrame:
-    
-    return df.calculate_relative_prices(symbol=symbol, benchmark_symbol=benchmark)
-
 
 def calculate_metrics(
         stock_data: pd.DataFrame,
