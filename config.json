@@ -45,5 +45,15 @@
     "equal_weight": 0.05,
     "amortized_root": 2
   },
-  "benchmark": "FTSEMIB.MI"
+  "benchmark": "FTSEMIB.MI",
+  "floor_ceiling": {
+    "vlty_n": 63,
+    "dist_pct": 0.05,
+    "retrace_pct": 0.05,
+    "threshold": 1.5,
+    "dgt": 2,
+    "d_vol": 5,
+    "r_vol": 2.5,
+    "lvl": 3
+  }
 }
