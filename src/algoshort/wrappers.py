@@ -1,6 +1,7 @@
 import pandas as pd
 from algoshort.regime_bo import RegimeBO
 from algoshort.regime_ma import TripleMACrossoverRegime
+from algoshort.regime_fc import RegimeFC
 from algoshort.utils import load_config, extract_signal_name
 from algoshort.returns import ReturnsCalculator
 from algoshort.strategy_metrics import StrategyMetrics
@@ -8,7 +9,8 @@ from algoshort.strategy_metrics import StrategyMetrics
 
 def calculate_metrics(
         stock_data: pd.DataFrame,
-        config_path: str = 'config.json'
+        signal_columns,
+        config_path: str = './config.json'
 ) -> pd.DataFrame:
     """
     Calculate risk metrics for each signal using StrategyMetrics.
@@ -29,7 +31,7 @@ def calculate_metrics(
     config = load_config(config_path)
     
     # Get signal names
-    signal_names = extract_signal_name(config_path)
+    signal_names = signal_columns
     
     # Validate signal columns
     missing_signals = [name for name in signal_names if name not in stock_data.columns]
@@ -58,7 +60,8 @@ def calculate_metrics(
 
 def calculate_return(
         stock_data: pd.DataFrame,
-        config_path: str = 'config.json'
+        signal_columns,
+        config_path: str = './config.json'
 ) -> tuple[pd.DataFrame, list]:
     """
     Calculate returns for each signal using ReturnsCalculator.
@@ -79,7 +82,7 @@ def calculate_return(
     config = load_config(config_path)
     
     # Get signal names
-    signal_names = extract_signal_name(config_path)
+    signal_names = signal_columns
     
     # Validate signal columns
     missing_signals = [name for name in signal_names if name not in stock_data.columns]
@@ -102,7 +105,7 @@ def calculate_return(
 
 def generate_signals(
         df: pd.DataFrame, 
-        config_path='config.json'
+        config_path='./config.json'
         ) -> tuple[pd.DataFrame, list]:
     """
     Generates signals for breakout, Turtle Trader, and MA crossover regimes.
@@ -139,6 +142,19 @@ def generate_signals(
             relative=config['regimes']['ma_crossover']['relative'],
             inplace=True
         )
+
+    regime_fc = RegimeFC(df=df)
+    df = regime_fc.compute_regime(
+        relative = config['regimes']['floor_ceiling']['relative'],
+        lvl = config['regimes']['floor_ceiling']['lvl'],
+        vlty_n = config['regimes']['floor_ceiling']['vlty_n'],
+        threshold = config['regimes']['floor_ceiling']['threshold'],
+        dgt = config['regimes']['floor_ceiling']['dgt'],
+        d_vol = config['regimes']['floor_ceiling']['d_vol'],
+        dist_pct = config['regimes']['floor_ceiling']['dist_pct'],
+        retrace_pct = config['regimes']['floor_ceiling']['retrace_pct'],
+        r_vol = config['regimes']['floor_ceiling']['r_vol']
+    )
     
     # Get signal column names
     signal_names = extract_signal_name(config_path)
