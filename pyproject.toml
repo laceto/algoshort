@@ -5,7 +5,7 @@ description = "A package for algorithmic short trading"
 authors = ["Luigi <luigi@example.com>"]
 readme = "README.md"
 packages = [
-    { include = "algoshort", from = "src" }
+    { include = "algoshort"}
 ]
 
 [tool.poetry.dependencies]
