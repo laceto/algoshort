@@ -7,7 +7,6 @@ readme = "README.md"
 packages = [
     { include = "algoshort", from = "src" }
 ]
-requires-python = ">=3.11"
 
 [tool.poetry.dependencies]
 python = ">=3.11"
