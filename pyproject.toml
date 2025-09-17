@@ -4,8 +4,6 @@ version = "0.1.0"
 description = "A package for algorithmic short trading"
 authors = ["Luigi <luigi@example.com>"]
 readme = "README.md"
-
-[tool.poetry]
 packages = [
     { include = "algoshort", from = "src" }
 ]
