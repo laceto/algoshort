@@ -169,4 +169,9 @@ def generate_signals(
     # Select signal columns dynamically
     signal_columns = [col for col in df.columns if any(col.startswith(prefix) for prefix in ['rbo_', 'bo_', 'rtt_', 'tt_', 'rsma_', 'sma_', 'rema_', 'ema_', 'rg', 'rrg'])]
     
+    signal_columns = [
+        item for item in signal_columns
+        if not any(keyword in item for keyword in ['short', 'medium', 'long'])
+    ]
+
     return df, signal_columns
