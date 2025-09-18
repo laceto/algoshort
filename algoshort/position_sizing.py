@@ -684,6 +684,12 @@ class PositionSizing:
             result_df['equal_weight'] = starting_capital
             result_df['amortized'] = starting_capital
 
+            result_df['equal_weight'] = result_df['equal_weight'].astype(float)
+            result_df['constant'] = result_df['constant'].astype(float)
+            result_df['convex'] = result_df['convex'].astype(float)
+            result_df['amortized'] = result_df['amortized'].astype(float)
+            result_df['concave'] = result_df['concave'].astype(float)
+
             # Initialize shares
             shs_fxd = shs_ccv = shs_cvx = shs_eql = shs_amz = 0
 
@@ -702,16 +708,16 @@ class PositionSizing:
                     position_count = max(0, position_count - 1)  # Exit position
 
                 # Update equity curves
-                result_df['equal_weight'].iloc[i] = result_df['equal_weight'].iloc[i-1] + \
-                                                   result_df[daily_change_col].iloc[i] * shs_eql
-                result_df['constant'].iloc[i] = result_df['constant'].iloc[i-1] + \
-                                               result_df[daily_change_col].iloc[i] * shs_fxd
-                result_df['concave'].iloc[i] = result_df['concave'].iloc[i-1] + \
-                                               result_df[daily_change_col].iloc[i] * shs_ccv
-                result_df['convex'].iloc[i] = result_df['convex'].iloc[i-1] + \
-                                              result_df[daily_change_col].iloc[i] * shs_cvx
-                result_df['amortized'].iloc[i] = result_df['amortized'].iloc[i-1] + \
-                                                 result_df[daily_change_col].iloc[i] * shs_amz
+                result_df.loc[result_df.index[i], 'equal_weight'] = result_df.loc[result_df.index[i-1], 'equal_weight'] + \
+                                                    result_df.loc[result_df.index[i], daily_change_col] * shs_eql
+                result_df.loc[result_df.index[i], 'constant'] = result_df.loc[result_df.index[i-1], 'constant'] + \
+                                                    result_df.loc[result_df.index[i], daily_change_col] * shs_fxd
+                result_df.loc[result_df.index[i], 'concave'] = result_df.loc[result_df.index[i-1], 'concave'] + \
+                                                    result_df.loc[result_df.index[i], daily_change_col] * shs_ccv
+                result_df.loc[result_df.index[i], 'convex'] = result_df.loc[result_df.index[i-1], 'convex'] + \
+                                                    result_df.loc[result_df.index[i], daily_change_col] * shs_cvx
+                result_df.loc[result_df.index[i], 'amortized'] = result_df.loc[result_df.index[i-1], 'amortized'] + \
+                                                    result_df.loc[result_df.index[i], daily_change_col] * shs_amz
 
                 # Calculate risk appetite for concave and convex strategies
                 concave_df = self.get_risk_appetite(
@@ -756,6 +762,7 @@ class PositionSizing:
                         ).iloc[0]
                         shs_cvx = self._equity_risk_shares(
                             pd.Series(px, index=[result_df.index[i]]), 
+                            pd.Series(sl, index=[result_df.index[i]]), 
                             pd.Series(result_df['convex'].iloc[i], index=[result_df.index[i]]), 
                             risk=cvx, fx=fx, lot=lot, signal=pd.Series(sig, index=[result_df.index[i]])
                         ).iloc[0]
