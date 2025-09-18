@@ -105,7 +105,8 @@ def calculate_return(
 
 def generate_signals(
         df: pd.DataFrame, 
-        config_path='./config.json'
+        config_path='./config.json',
+        relative: bool = True
         ) -> tuple[pd.DataFrame, list]:
     """
     Generates signals for breakout, Turtle Trader, and MA crossover regimes.
@@ -128,10 +129,10 @@ def generate_signals(
     config = load_config(config_path)
 
     regime_bo.compute_regime(regime_type='breakout', window=config['regimes']['breakout']['bo_window'],
-                             relative=config['regimes']['breakout']['relative'], inplace=True)
+                             relative=relative, inplace=True)
     regime_bo.compute_regime(regime_type='turtle', fast_window=config['regimes']['turtle']['fast_window'],
                              window=config['regimes']['turtle']['slow_window'],
-                             relative=config['regimes']['turtle']['relative'], inplace=True)
+                             relative=relative, inplace=True)
 
     for ma_type in config['regimes']['ma_crossover']['ma_type']:
         regime_ma.compute_ma_regime(
@@ -139,13 +140,13 @@ def generate_signals(
             short_window=config['regimes']['ma_crossover']['short_window'],
             medium_window=config['regimes']['ma_crossover']['medium_window'],
             long_window=config['regimes']['ma_crossover']['long_window'],
-            relative=config['regimes']['ma_crossover']['relative'],
+            relative=relative,
             inplace=True
         )
 
     regime_fc = RegimeFC(df=df)
     df = regime_fc.compute_regime(
-        relative = config['regimes']['floor_ceiling']['relative'],
+        relative = relative,
         lvl = config['regimes']['floor_ceiling']['lvl'],
         vlty_n = config['regimes']['floor_ceiling']['vlty_n'],
         threshold = config['regimes']['floor_ceiling']['threshold'],
