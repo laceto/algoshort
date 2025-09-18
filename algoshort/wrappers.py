@@ -5,6 +5,7 @@ from algoshort.regime_fc import RegimeFC
 from algoshort.utils import load_config, extract_signal_name
 from algoshort.returns import ReturnsCalculator
 from algoshort.strategy_metrics import StrategyMetrics
+import warnings
 
 
 def calculate_metrics(
@@ -163,9 +164,9 @@ def generate_signals(
     # Verify signal columns exist
     missing_signals = [name for name in signal_names if name not in df.columns]
     if missing_signals:
-        raise ValueError(f"Signal columns not generated: {missing_signals}")
+        warnings.warn(f"Signal columns not generated: {missing_signals}", UserWarning)
     
     # Select signal columns dynamically
-    signal_columns = [col for col in df.columns if any(col.startswith(prefix) for prefix in ['rbo_', 'bo_', 'rtt_', 'tt_', 'rsma_', 'sma_', 'rema_', 'ema_'])]
+    signal_columns = [col for col in df.columns if any(col.startswith(prefix) for prefix in ['rbo_', 'bo_', 'rtt_', 'tt_', 'rsma_', 'sma_', 'rema_', 'ema_', 'rg', 'rrg'])]
     
     return df, signal_columns
