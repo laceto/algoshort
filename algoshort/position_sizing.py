@@ -112,7 +112,7 @@ class PositionSizing:
         return pd.Series(fraction, index=qty.index)
     
     def _equity_risk_shares(self, price: pd.Series, stop_loss: pd.Series, eqty: pd.Series, 
-                            risk: float, fx: float, lot: float, signal: pd.Series) -> pd.Series:
+                            risk: float, fx: float, lot: float) -> pd.Series:
         """
         Calculates number of shares based on equity and fixed risk fraction, rounded to lot size, 
         for both long and short positions. Shares are positive for long positions (signal > 0) 
@@ -125,7 +125,6 @@ class PositionSizing:
             risk (float): Fixed risk fraction (e.g., -0.005 for 0.5% risk).
             fx (float): Currency conversion factor.
             lot (float): Lot size (e.g., 100 for stocks).
-            signal (pd.Series): Signal series indicating trade direction (e.g., 1 for long, -1 for short, 0 for no position).
 
         Returns:
             pd.Series: Number of shares, rounded to lot size, positive for long, negative for short.
@@ -150,7 +149,7 @@ class PositionSizing:
             budget = eqty * risk * fx
             shares = np.where(r != 0, (budget // (r * lot)) * lot, 0)
             # Apply sign based on signal: positive for long (signal > 0), negative for short (signal < 0)
-            signed_shares = shares * np.sign(signal)
+            signed_shares = shares
             return pd.Series(signed_shares, index=price.index)
         except Exception as e:
             raise ValueError(f"Error computing equity risk shares: {str(e)}")
@@ -774,19 +773,19 @@ class PositionSizing:
                             pd.Series(px, index=[result_df.index[i]]), 
                             pd.Series(sl, index=[result_df.index[i]]), 
                             pd.Series(result_df['constant'].iloc[i], index=[result_df.index[i]]), 
-                            risk=avg, fx=fx, lot=lot, signal=pd.Series(sig, index=[result_df.index[i]])
+                            risk=avg, fx=fx, lot=lot
                         ).iloc[0]
                         shs_ccv = self._equity_risk_shares(
                             pd.Series(px, index=[result_df.index[i]]), 
                             pd.Series(sl, index=[result_df.index[i]]), 
                             pd.Series(result_df['concave'].iloc[i], index=[result_df.index[i]]), 
-                            risk=ccv, fx=fx, lot=lot, signal=pd.Series(sig, index=[result_df.index[i]])
+                            risk=ccv, fx=fx, lot=lot
                         ).iloc[0]
                         shs_cvx = self._equity_risk_shares(
                             pd.Series(px, index=[result_df.index[i]]), 
                             pd.Series(sl, index=[result_df.index[i]]), 
                             pd.Series(result_df['convex'].iloc[i], index=[result_df.index[i]]), 
-                            risk=cvx, fx=fx, lot=lot, signal=pd.Series(sig, index=[result_df.index[i]])
+                            risk=cvx, fx=fx, lot=lot
                         ).iloc[0]
 
             return result_df
