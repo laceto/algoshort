@@ -761,12 +761,12 @@ class PositionSizing:
                     sig = result_df[signal].iloc[i]
 
                     # Calculate shares for equal weight (positive for long, negative for short)
-                    shs_eql = (result_df['equal_weight'].iloc[i] * equal_weight * fx // (px * lot)) * lot * np.sign(sig)
+                    shs_eql = (result_df['equal_weight'].iloc[i] * equal_weight * fx // (px * lot)) * lot
 
                     # Calculate shares for amortized weight
                     amortization = self._pyramid(position_count, root=amortized_root)
                     amz_weight = self._amortized_weight(equal_weight, amortization)
-                    shs_amz = (result_df['amortized'].iloc[i] * amz_weight * fx // (px * lot)) * lot * np.sign(sig)
+                    shs_amz = (result_df['amortized'].iloc[i] * amz_weight * fx // (px * lot)) * lot
 
                     # Calculate shares for other strategies
                     if px != sl:
