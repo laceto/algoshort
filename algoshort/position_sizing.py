@@ -605,13 +605,13 @@ class PositionSizing:
             raise ValueError(f"Error computing position sizing metrics: {str(e)}")
 
     def compare_position_sizing(self, df: pd.DataFrame, signal: str, price_col: str = 'Close', 
-                               stop_loss_col: str = 'stop_loss', fx_col: str = 'fx', 
-                               daily_change_col: str = 'tt_chg1D_fx', 
-                               starting_capital: float = 1000000, lot: float = 100, 
-                               tolerance: float = -0.1, min_risk: float = -0.0025, 
-                               max_risk: float = -0.0075, span: int = 5, 
-                               equal_weight: float = 0.05, amortized_root: float = 2, 
-                               inplace: bool = False) -> pd.DataFrame:
+                            stop_loss_col: str = 'stop_loss', fx_col: str = 'fx', 
+                            daily_change_col: str = 'tt_chg1D_fx', 
+                            starting_capital: float = 1000000, lot: float = 100, 
+                            tolerance: float = -0.1, min_risk: float = -0.0025, 
+                            max_risk: float = -0.0075, span: int = 5, 
+                            equal_weight: float = 0.05, amortized_root: float = 2, 
+                            inplace: bool = False) -> pd.DataFrame:
         """
         Compares position sizing algorithms (constant, concave, convex, equal weight, amortized weight) by calculating
         equity curves based on daily price changes and entry signals for both long and short positions.
@@ -642,6 +642,11 @@ class PositionSizing:
                 - 'convex': Equity curve for convex risk appetite strategy.
                 - 'equal_weight': Equity curve for equal weight strategy.
                 - 'amortized': Equity curve for amortized weight strategy.
+                - 'shs_fxd': Shares for constant risk strategy.
+                - 'shs_ccv': Shares for concave risk appetite strategy.
+                - 'shs_cvx': Shares for convex risk appetite strategy.
+                - 'shs_eql': Shares for equal weight strategy.
+                - 'shs_amz': Shares for amortized weight strategy.
 
         Raises:
             KeyError: If required columns are missing.
@@ -677,18 +682,28 @@ class PositionSizing:
             # Create working DataFrame
             result_df = df if inplace else df.copy()
 
-            # Initialize equity curves
+            # Initialize equity curves and shares
             result_df['constant'] = starting_capital
             result_df['concave'] = starting_capital
             result_df['convex'] = starting_capital
             result_df['equal_weight'] = starting_capital
             result_df['amortized'] = starting_capital
+            result_df['shs_fxd'] = 0
+            result_df['shs_ccv'] = 0
+            result_df['shs_cvx'] = 0
+            result_df['shs_eql'] = 0
+            result_df['shs_amz'] = 0
 
             result_df['equal_weight'] = result_df['equal_weight'].astype(float)
             result_df['constant'] = result_df['constant'].astype(float)
             result_df['convex'] = result_df['convex'].astype(float)
             result_df['amortized'] = result_df['amortized'].astype(float)
             result_df['concave'] = result_df['concave'].astype(float)
+            result_df['shs_fxd'] = result_df['shs_fxd'].astype(float)
+            result_df['shs_ccv'] = result_df['shs_ccv'].astype(float)
+            result_df['shs_cvx'] = result_df['shs_cvx'].astype(float)
+            result_df['shs_eql'] = result_df['shs_eql'].astype(float)
+            result_df['shs_amz'] = result_df['shs_amz'].astype(float)
 
             # Initialize shares
             shs_fxd = shs_ccv = shs_cvx = shs_eql = shs_amz = 0
@@ -718,6 +733,13 @@ class PositionSizing:
                                                     result_df.loc[result_df.index[i], daily_change_col] * shs_cvx
                 result_df.loc[result_df.index[i], 'amortized'] = result_df.loc[result_df.index[i-1], 'amortized'] + \
                                                     result_df.loc[result_df.index[i], daily_change_col] * shs_amz
+
+                # Store current shares in DataFrame
+                result_df.loc[result_df.index[i], 'shs_fxd'] = shs_fxd
+                result_df.loc[result_df.index[i], 'shs_ccv'] = shs_ccv
+                result_df.loc[result_df.index[i], 'shs_cvx'] = shs_cvx
+                result_df.loc[result_df.index[i], 'shs_eql'] = shs_eql
+                result_df.loc[result_df.index[i], 'shs_amz'] = shs_amz
 
                 # Calculate risk appetite for concave and convex strategies
                 concave_df = self.get_risk_appetite(
