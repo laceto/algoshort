@@ -134,9 +134,9 @@ class PositionSizing:
         """
         try:
             # Validate inputs
-            if not all(np.issubdtype(s.dtype, np.number) for s in [price, stop_loss, eqty, signal]):
+            if not all(np.issubdtype(s.dtype, np.number) for s in [price, stop_loss, eqty]):
                 raise ValueError("price, stop_loss, eqty, and signal must contain numeric data.")
-            if not all(len(s) == len(price) for s in [stop_loss, eqty, signal]):
+            if not all(len(s) == len(price) for s in [stop_loss, eqty]):
                 raise ValueError("price, stop_loss, eqty, and signal must have the same length.")
             if risk >= 0:
                 raise ValueError("risk must be negative (e.g., -0.005 for 0.5% risk).")
