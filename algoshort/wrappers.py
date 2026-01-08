@@ -45,12 +45,19 @@ def calculate_metrics(
     # Calculate risk metrics for each signal
     try:
         for signal in signal_names:
-            stock_data = strategy_metrics.get_risk_metrics(
+            strategy_metrics.get_risk_metrics(
                 df=stock_data,
                 signal=signal,
                 window=config['metrics']['risk_window'],
                 percentile=config['metrics']['percentile'],
                 limit=config['metrics']['limit'],
+                inplace=True
+            )
+
+            strategy_metrics.get_expectancies(
+                df=stock_data,
+                signal=signal,
+                window=100,
                 inplace=True
             )
     except Exception as e:
