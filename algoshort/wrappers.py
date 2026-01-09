@@ -7,8 +7,7 @@ from algoshort.returns import ReturnsCalculator
 from algoshort.strategy_metrics import StrategyMetrics
 import warnings
 
-
-def calculate_metrics(
+def calculate_trading_edge(
         stock_data: pd.DataFrame,
         signal_columns,
         config_path: str = './config.json'
@@ -42,29 +41,98 @@ def calculate_metrics(
     # Initialize ReturnsCalculator
     strategy_metrics = StrategyMetrics(stock_data)
     
+# 1. Create a list to store all the new metric DataFrames
+    new_metrics_frames = []
+    
+    # Calculate metrics for each signal
+    try:
+        for signal in signal_names:
+            # We call the functions with inplace=False to get a fresh DF of JUST the new columns
+            # Note: Ensure your get_expectancies/get_risk_metrics return 
+            # the combined DF or just the new columns based on your implementation.
+            
+            # Here we assume the refactored version that creates new columns:
+            metrics_df = strategy_metrics.get_expectancies(
+                df=stock_data,
+                signal=signal,
+                window=100,
+                inplace=False
+            )
+            
+            # To avoid duplicating the original stock_data columns in every loop, 
+            # we extract ONLY the new columns added in this iteration.
+            new_cols = metrics_df.iloc[:, len(stock_data.columns):]
+            new_metrics_frames.append(new_cols)
+
+    except Exception as e:
+        raise ValueError(f"Error calculating risk metrics for signal {signal}: {str(e)}")
+    
+    # 2. Final Tip: Concatenate all new columns at once and force a copy to defragment
+    if new_metrics_frames:
+        # Join the original data with all new metric columns in one go
+        stock_data = pd.concat([stock_data] + new_metrics_frames, axis=1)
+        
+        # Defragment memory and clean up the block manager
+        stock_data = stock_data.copy()
+    
+    return stock_data
+
+def calculate_risk_metrics(
+        stock_data: pd.DataFrame,
+        signal_columns: list,
+        config_path: str = './config.json'
+) -> pd.DataFrame:
+    """
+    Calculate risk metrics for each signal using a batch-concatenation 
+    approach to avoid DataFrame fragmentation.
+    """
+    # Load config
+    config = load_config(config_path)
+    
+    # Get signal names
+    signal_names = signal_columns
+    
+    # Validate signal columns
+    missing_signals = [name for name in signal_names if name not in stock_data.columns]
+    if missing_signals:
+        raise ValueError(f"Signal columns not found in DataFrame: {missing_signals}")
+    
+    # Initialize StrategyMetrics
+    strategy_metrics = StrategyMetrics(stock_data)
+    
+    # 1. Store the original column count to isolate new columns later
+    original_col_count = len(stock_data.columns)
+    new_metrics_frames = []
+    
     # Calculate risk metrics for each signal
     try:
         for signal in signal_names:
-            strategy_metrics.get_risk_metrics(
+            # Generate metrics (inplace=False returns a new DataFrame)
+            metrics_df = strategy_metrics.get_risk_metrics(
                 df=stock_data,
                 signal=signal,
                 window=config['metrics']['risk_window'],
                 percentile=config['metrics']['percentile'],
                 limit=config['metrics']['limit'],
-                inplace=True
+                inplace=False
             )
+            
+            # Isolate only the newly created columns
+            new_cols = metrics_df.iloc[:, original_col_count:]
+            new_metrics_frames.append(new_cols)
 
-            strategy_metrics.get_expectancies(
-                df=stock_data,
-                signal=signal,
-                window=100,
-                inplace=True
-            )
     except Exception as e:
         raise ValueError(f"Error calculating risk metrics for signal {signal}: {str(e)}")
     
+    # 2. Final Tip: Batch concat and defragment
+    if new_metrics_frames:
+        # Concatenate original data with all results in one operation
+        stock_data = pd.concat([stock_data] + new_metrics_frames, axis=1)
+        
+        # Consolidate memory blocks
+        stock_data = stock_data.copy()
+    
     return stock_data
-
 
 def calculate_return(
         stock_data: pd.DataFrame,
