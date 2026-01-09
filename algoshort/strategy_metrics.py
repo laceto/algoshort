@@ -208,18 +208,23 @@ class StrategyMetrics:
             if not np.issubdtype(df[log_returns_col].dtype, np.number):
                 raise ValueError(f"Log returns column '{log_returns_col}' must contain numeric data.")
 
+            # print(signal)
             # Create working DataFrame
-            result_df = df if inplace else df.copy()
+            # result_df = df if inplace else df.copy()
 
             # Cache key for expectancy metrics
             cache_key_prefix = f"expectancy_{signal}_{window}"
 
             # Separate profits from losses
-            tt_log_returns = result_df[[log_returns_col]].copy()
-            loss_roll = tt_log_returns.copy()
-            loss_roll[loss_roll > 0] = np.nan
-            win_roll = tt_log_returns.copy()
-            win_roll[win_roll < 0] = np.nan
+            # tt_log_returns = result_df[[log_returns_col]].copy()
+            # loss_roll = tt_log_returns.copy()
+            # loss_roll[loss_roll > 0] = np.nan
+            # win_roll = tt_log_returns.copy()
+            # win_roll[win_roll < 0] = np.nan
+
+            tt_log_returns = df[log_returns_col]
+            loss_roll = tt_log_returns.where(tt_log_returns < 0)
+            win_roll = tt_log_returns.where(tt_log_returns > 0)
 
             # Calculate rolling metrics
             cache_key_win_rate = f"{cache_key_prefix}_win_rate"
@@ -251,19 +256,31 @@ class StrategyMetrics:
                 avg_loss = loss_roll.fillna(0).rolling(window, min_periods=window).mean()
                 self._cache[cache_key_avg_loss] = avg_loss
 
-            # Calculate expectancy metrics
-            result_df[f'{signal}_trading_edge'] = self._expectancy(win_rate[log_returns_col], 
-                                                                 avg_win[log_returns_col], 
-                                                                 avg_loss[log_returns_col]).ffill()
-            result_df[f'{signal}_geometric_expectancy'] = self._geometric_expectancy(win_rate[log_returns_col], 
-                                                                                   avg_win[log_returns_col], 
-                                                                                   avg_loss[log_returns_col]).ffill()
-            result_df[f'{signal}_kelly'] = self._kelly(win_rate[log_returns_col], 
-                                                      avg_win[log_returns_col], 
-                                                      avg_loss[log_returns_col]).ffill()
+            # 2. Calculate the metrics into a temporary dictionary
+            # This avoids modifying the DataFrame multiple times
+            new_metrics = {}
+            
+            # These are already Series objects containing the values you need
+            new_metrics[f'{signal}_trading_edge'] = self._expectancy(
+                win_rate, avg_win, avg_loss
+            ).ffill()
 
-            return result_df
+            new_metrics[f'{signal}_geometric_expectancy'] = self._geometric_expectancy(
+                win_rate, avg_win, avg_loss
+            ).ffill()
 
+            new_metrics[f'{signal}_kelly'] = self._kelly(
+                win_rate, avg_win, avg_loss
+            ).ffill()
+
+            # 3. Join everything at once
+            if inplace:
+                for col_name, series in new_metrics.items():
+                    df[col_name] = series
+                return df
+            else:
+                # This is the most efficient way to add multiple columns
+                return pd.concat([df, pd.DataFrame(new_metrics, index=df.index)], axis=1)
         except Exception as e:
             raise ValueError(f"Error computing expectancy metrics: {str(e)}")
         
@@ -301,78 +318,64 @@ class StrategyMetrics:
             if len(df) < window:
                 raise ValueError(f"DataFrame length ({len(df)}) must be >= window ({window}).")
             if not 0 < percentile < 0.5:
-                raise ValueError("percentile must be between 0 and 0.5 (e.g., 0.05 for 5th/95th percentiles).")
+                raise ValueError("percentile must be between 0 and 0.5.")
             if limit <= 0:
                 raise ValueError("limit must be positive.")
+                
             log_returns_col = f'{signal}_log_returns'
             cumul_returns_col = f'{signal}_cumul'
+            
             if log_returns_col not in df.columns:
-                raise KeyError(f"Log returns column '{log_returns_col}' not found in DataFrame.")
+                raise KeyError(f"Log returns column '{log_returns_col}' not found.")
             if cumul_returns_col not in df.columns:
-                raise KeyError(f"Cumulative returns column '{cumul_returns_col}' not found in DataFrame.")
-            if not np.issubdtype(df[log_returns_col].dtype, np.number) or \
-               not np.issubdtype(df[cumul_returns_col].dtype, np.number):
-                raise ValueError(f"Columns '{log_returns_col}' and '{cumul_returns_col}' must contain numeric data.")
-
-            # Create working DataFrame
-            result_df = df if inplace else df.copy()
+                raise KeyError(f"Cumulative returns column '{cumul_returns_col}' not found.")
 
             # Cache key for risk metrics
             cache_key_prefix = f"risk_metrics_{signal}_{window}_{percentile}_{limit}"
 
-            # Calculate profit ratio metrics
-            cache_key_roll_profits = f"{cache_key_prefix}_roll_profits"
-            cache_key_roll_losses = f"{cache_key_prefix}_roll_losses"
-            cache_key_exp_profits = f"{cache_key_prefix}_exp_profits"
-            cache_key_exp_losses = f"{cache_key_prefix}_exp_losses"
+            # 1. Calculate metrics and store in local variables
+            # Profit Ratios
+            cp_rp = f"{cache_key_prefix}_roll_profits"
+            roll_profits = self._cache[cp_rp] if cp_rp in self._cache else self._rolling_profits(df[log_returns_col], window)
+            self._cache[cp_rp] = roll_profits
 
-            if cache_key_roll_profits in self._cache:
-                roll_profits = self._cache[cache_key_roll_profits]
+            cp_rl = f"{cache_key_prefix}_roll_losses"
+            roll_losses = self._cache[cp_rl] if cp_rl in self._cache else self._rolling_losses(df[log_returns_col], window)
+            self._cache[cp_rl] = roll_losses
+
+            cp_ep = f"{cache_key_prefix}_exp_profits"
+            exp_profits = self._cache[cp_ep] if cp_ep in self._cache else self._expanding_profits(df[log_returns_col])
+            self._cache[cp_ep] = exp_profits
+
+            cp_el = f"{cache_key_prefix}_exp_losses"
+            exp_losses = self._cache[cp_el] if cp_el in self._cache else self._expanding_losses(df[log_returns_col])
+            self._cache[cp_el] = exp_losses
+
+            # Tail Ratios
+            cp_rt = f"{cache_key_prefix}_roll_tr"
+            roll_tr = self._cache[cp_rt] if cp_rt in self._cache else self._rolling_tail_ratio(df[cumul_returns_col], window, percentile, limit)
+            self._cache[cp_rt] = roll_tr
+
+            cp_et = f"{cache_key_prefix}_exp_tr"
+            exp_tr = self._cache[cp_et] if cp_et in self._cache else self._expanding_tail_ratio(df[cumul_returns_col], percentile, limit)
+            self._cache[cp_et] = exp_tr
+
+            # 2. Collect everything into a dictionary
+            new_metrics = {
+                f'{signal}_pr_roll': self._profit_ratio(roll_profits, roll_losses),
+                f'{signal}_pr': self._profit_ratio(exp_profits, exp_losses),
+                f'{signal}_tr_roll': roll_tr,
+                f'{signal}_tr': exp_tr
+            }
+
+            # 3. Join everything at once
+            if inplace:
+                for col_name, series in new_metrics.items():
+                    df[col_name] = series
+                return df
             else:
-                roll_profits = self._rolling_profits(result_df[log_returns_col], window)
-                self._cache[cache_key_roll_profits] = roll_profits
-
-            if cache_key_roll_losses in self._cache:
-                roll_losses = self._cache[cache_key_roll_losses]
-            else:
-                roll_losses = self._rolling_losses(result_df[log_returns_col], window)
-                self._cache[cache_key_roll_losses] = roll_losses
-
-            if cache_key_exp_profits in self._cache:
-                exp_profits = self._cache[cache_key_exp_profits]
-            else:
-                exp_profits = self._expanding_profits(result_df[log_returns_col])
-                self._cache[cache_key_exp_profits] = exp_profits
-
-            if cache_key_exp_losses in self._cache:
-                exp_losses = self._cache[cache_key_exp_losses]
-            else:
-                exp_losses = self._expanding_losses(result_df[log_returns_col])
-                self._cache[cache_key_exp_losses] = exp_losses
-
-            result_df[f'{signal}_pr_roll'] = self._profit_ratio(roll_profits, roll_losses)
-            result_df[f'{signal}_pr'] = self._profit_ratio(exp_profits, exp_losses)
-
-            # Calculate tail ratio metrics
-            cache_key_roll_tr = f"{cache_key_prefix}_roll_tr"
-            cache_key_exp_tr = f"{cache_key_prefix}_exp_tr"
-
-            if cache_key_roll_tr in self._cache:
-                roll_tr = self._cache[cache_key_roll_tr]
-            else:
-                roll_tr = self._rolling_tail_ratio(result_df[cumul_returns_col], window, percentile, limit)
-                self._cache[cache_key_roll_tr] = roll_tr
-
-            if cache_key_exp_tr in self._cache:
-                exp_tr = self._cache[cache_key_exp_tr]
-            else:
-                exp_tr = self._expanding_tail_ratio(result_df[cumul_returns_col], percentile, limit)
-                self._cache[cache_key_exp_tr] = exp_tr
-
-            result_df[f'{signal}_tr_roll'] = roll_tr
-            result_df[f'{signal}_tr'] = exp_tr
-
-            return result_df
+                # This is the most efficient way to add multiple columns
+                return pd.concat([df, pd.DataFrame(new_metrics, index=df.index)], axis=1)
 
         except Exception as e:
             raise ValueError(f"Error computing risk metrics: {str(e)}")
