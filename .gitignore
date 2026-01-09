@@ -36,3 +36,5 @@ fc_test.py
 folder_structure.py
 test_regime_fc.ipynb
 config.json
+
+data/
