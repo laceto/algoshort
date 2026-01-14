@@ -15,8 +15,8 @@ config = load_config(config_path)
 
 # download data
 handler = YFinanceDataHandler(cache_dir="./cache")
-handler.download_data(['MONC.MI', 'FTSEMIB.MI'], start='2016-01-01', end=date.today(), use_cache=True)
-# df = handler.get_data('MONC.MI')
+# handler.download_data(['MONC.MI', 'FTSEMIB.MI'], start='2016-01-01', end=date.today(), use_cache=True)
+handler.download_data(['MONC.MI', 'FTSEMIB.MI'], start='2021-01-07', end='2022-09-01', use_cache=False)
 df = handler.get_ohlc_data('MONC.MI')
 df['fx'] = 1
 bmk = handler.get_ohlc_data('FTSEMIB.MI')
@@ -32,7 +32,8 @@ df = processor.calculate_relative_prices(
     )
 
 # triage stock
-regime_fc = RegimeFC(df)
+import logging
+regime_fc = RegimeFC(df, logging.WARNING)
 df = regime_fc.compute_regime(
         relative = True,
         lvl = config['regimes']['floor_ceiling']['lvl'],
@@ -49,8 +50,8 @@ df = regime_fc.compute_regime(
 regime_bo = RegimeBO(ohlc_stock=df)
 
 search_space = {
-    'fast': [10, 20],
-    'slow': [50, 50]
+    'fast': [10],
+    'slow': [50]
 }
 
 for w_val, m_val in zip(*search_space.values()):
@@ -61,85 +62,70 @@ for w_val, m_val in zip(*search_space.values()):
 
 # Includes any column starting with 'rtt_' OR exactly matching 'rrg'
 signal_columns = [col for col in df.columns if any(col.startswith(prefix) for prefix in ['rtt_'])]
-
+signal_columns = ['rtt_5010']
 # calculate return
 df = calculate_return(df, config_path=config_path, signal_columns=signal_columns)
 
-
-
-# # calculate pos size and equity curves
-# pos = PositionSizing(df)
-# df = pos.compare_position_sizing(df=df, signal=s, price_col=price_col, stop_loss_col=stop_loss_name, daily_change_col = change_name, inplace=False)
-# print(df[['constant', 'concave', 'convex', 'equal_weight']].tail(1))
-
-def get_equity(is_data, signal, price_col = 'close'):
-
-    pos = PositionSizing(is_data)
-    df = pos.compare_position_sizing(df=is_data, signal=signal, price_col=price_col, stop_loss_col=signal + '_stop_loss', daily_change_col = signal + '_chg1D_fx', inplace=False)
-    metrics_df = df[[signal, signal + '_stop_loss', signal + '_chg1D_fx','constant', 'concave', 'convex', 'equal_weight']]
-    # metrics_df = df[['constant', 'concave', 'convex', 'equal_weight']]
-    row = metrics_df.iloc[-1].to_dict()
-    return row
-
-
-from algoshort.optimizer import StrategyOptimizer
-
-# 1. Setup
 calc = StopLossCalculator(df)
-optimizer = StrategyOptimizer(df, calc, get_equity)
+price_col = 'close'
+df = calc.atr_stop_loss('rtt_5010', window=10, multiplier=1.5, price_col=price_col)
+pos = PositionSizing(df)
+pos.compare_position_sizing(df=df, signal='rtt_5010', price_col='close', stop_loss_col='rtt_5010_stop_loss', daily_change_col = 'rtt_5010_chg1D_fx', inplace=True)
+df.to_excel('output.xlsx')
 
-# 2. Run Rolling Walk-Forward
-windows = [10]
-multipliers = [1.5, 2.5]
-oos_df, stability, param_history = optimizer.rolling_walk_forward(
-    signal='rtt_5010', 
-    close_col = 'close',
-    windows=windows, 
-    multipliers=multipliers,
-    n_segments=5
-)
-print('oos')
-print(oos_df)
 
-print(param_history)
+# shs_cols = [
+#     'shs_fxd',
+#     'shs_ccv',
+#     'shs_cvx',
+#     'shs_eql'
+# ]
 
-# print(stability)
 
-# sens = optimizer.sensitivity_analysis(signal='rtt_5020', best_w=15, best_m=1.5, variance=0.2)
-# print(sens)
+# def get_equity(is_data, signal, i, price_col = 'close'):
 
-# n_segments = 5
-# segment_size = len(df) // (n_segments + 1)
-# oos_results = []
-# param_history = []
-# data = df
-# i = 3
+#     pos = PositionSizing(is_data)
+#     df = pos.compare_position_sizing(df=is_data, signal=signal, price_col=price_col, stop_loss_col=signal + '_stop_loss', daily_change_col = signal + '_chg1D_fx', inplace=False)
+#     df.to_excel(f"{i}output.xlsx")
+#     metrics_df = df[['constant', 'concave', 'convex', 'equal_weight']]
+#     # metrics_df = df
+#     row = metrics_df.iloc[-1].to_dict()
+#     return row
+
+# # def get_equity(is_data, signal, price_col = 'close'):
+
+# #     pos = PositionSizing(is_data)
+# #     df = pos.compare_position_sizing(df=is_data, signal=signal, price_col=price_col, stop_loss_col=signal + '_stop_loss', daily_change_col = signal + '_chg1D_fx', inplace=False)
+# #     # metrics_df = df[[signal, signal + '_stop_loss', shs_cols,'constant', 'concave', 'convex', 'equal_weight']]
+# #     # metrics_df = df[['constant', 'concave', 'convex', 'equal_weight']]
+# #     # metrics_df = df
+# #     # row = metrics_df.iloc[-1].to_dict()
+# #     return df.to_dict()
+
+
+# from algoshort.optimizer import StrategyOptimizer
+
+# # 1. Setup
+# calc = StopLossCalculator(df)
+# optimizer = StrategyOptimizer(df, calc, get_equity)
+
+# # 2. Run Rolling Walk-Forward
 # windows = [10]
 # multipliers = [1.5, 2.5]
+# oos_df, stability, param_history = optimizer.rolling_walk_forward(
+#     signal='rtt_5010', 
+#     close_col = 'close',
+#     windows=windows, 
+#     multipliers=multipliers,
+#     n_segments=5
+# )
+# print('oos')
+# print(oos_df)
 
-# is_data = data.iloc[i * segment_size : (i + 1) * segment_size]
-# oos_data = data.iloc[(i + 1) * segment_size : (i + 2) * segment_size]
+# # print(param_history)
 
-# calc = StopLossCalculator(is_data)
-# optimizer = StrategyOptimizer(is_data, calc, get_equity)
-# signal = 'rtt_5010'
-# windows = [10,]
-# multipliers = [1.5, 2.5]
+# # print(stability)
 
-# equity_by_sl = optimizer.run_grid_search(is_data=is_data, signal=signal, windows=windows, multipliers=multipliers)
-# # print(f"--- is data: {equity_by_sl[signal_columns]}")
-# # print(equity_by_sl)
+# # sens = optimizer.sensitivity_analysis(signal='rtt_5020', best_w=15, best_m=1.5, variance=0.2)
+# # print(sens)
 
-# best_row = equity_by_sl.sort_values('convex', ascending=False).iloc[0]
-# w_best, m_best = int(best_row['window']), best_row['multiplier']
-# # w_best, m_best
-
-# print(f"--- best window is: {w_best}")
-# print(f"--- best multiplier is: {m_best}")
-
-# # calc = StopLossCalculator(oos_data)
-# price_col = 'close'
-# calc.data = oos_data
-# final_oos = calc.atr_stop_loss(signal, window=w_best, multiplier=m_best, price_col=price_col)
-
-# print(get_equity(final_oos, signal='rtt_5010', price_col=price_col))

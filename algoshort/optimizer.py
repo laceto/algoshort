@@ -18,14 +18,14 @@ class StrategyOptimizer:
         self.best_params = {}
 
    
-    def run_grid_search(self, is_data, signal, windows, multipliers, price_col = 'close'):
+    def run_grid_search(self, is_data, signal, windows, multipliers, i, price_col = 'close'):
         """Performs a standard grid search on a specific data segment."""
         results = []
         self.calc.data = is_data
         
         for w, m in itertools.product(windows, multipliers):
             temp_df = self.calc.atr_stop_loss(signal=signal, window=w, multiplier=m, price_col=price_col)
-            row = self.equity_func(temp_df, signal, price_col = price_col)
+            row = self.equity_func(temp_df, signal, i, price_col = price_col)
             row.update({'window': w, 'multiplier': m})
             results.append(row)
             
@@ -44,7 +44,7 @@ class StrategyOptimizer:
             oos_data = self.data.iloc[(i + 1) * segment_size : (i + 2) * segment_size]
 
             # In-Sample Optimization
-            is_df = self.run_grid_search(is_data, signal, windows, multipliers, price_col = close_col)
+            is_df = self.run_grid_search(is_data, signal, windows, multipliers, i, price_col = close_col)
             best_row = is_df.sort_values('convex', ascending=False).iloc[0]
             
             w_best, m_best = int(best_row['window']), best_row['multiplier']
@@ -53,8 +53,9 @@ class StrategyOptimizer:
             # Out-of-Sample Validation
             self.calc.data = oos_data
             final_oos = self.calc.atr_stop_loss(signal, window=w_best, multiplier=m_best, price_col=close_col)
-            oos_metrics = self.equity_func(final_oos, signal, close_col)
+            oos_metrics = self.equity_func(final_oos, signal, i, close_col)
             oos_metrics['segment'] = i + 1
+            # oos_metrics.to_excel(str(i+'output.xlsx'))
             # oos_metrics['w_best'] = w_best
             # oos_metrics['m_best'] = m_best
             oos_results.append(oos_metrics)
