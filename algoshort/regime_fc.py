@@ -36,6 +36,8 @@ class RegimeFC:
             OHLC DataFrame with columns 'open', 'high', 'low', 'close' (or relative equivalents).
         log_level : int, default=logging.INFO
             Logging level for the class operations.
+            - logging.CRITICAL + 1 (or logging.NOTSET) for no logs at all
+            - logging.WARNING to keep only warning, error and critical
             
         Raises:
         -------
