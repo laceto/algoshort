@@ -94,6 +94,7 @@ class StrategyOptimizer:
             **param_kwargs,
         )
         metrics = self.equity_func(df_with_stops, signal, segment_idx, close_col)
+        print(f"Signal: {signal} | Segment: {segment_idx} | Raw metrics from equity_func: {metrics}")
         
         # Normalize return type to dict
         if isinstance(metrics, pd.Series):
@@ -288,6 +289,10 @@ class StrategyOptimizer:
                 backend="loky",
                 prefer="processes",
             )
+            
+            print(f"\n=== IS results for signal {signal} segment {i} ===")
+            print(is_results[["window", "multiplier", "convex"]].sort_values("convex", ascending=False).head(5))
+            print("Convex values unique:", is_results["convex"].unique())
 
             if is_results.empty:
                 continue
@@ -401,37 +406,77 @@ class StrategyOptimizer:
 
     def compare_signals(
         self,
-        signals: Sequence[str],
+        signals: Union[str, Sequence[str]],
         stop_method: str,
         param_grid: Dict[str, Iterable[Any]],
-        **walk_forward_kwargs,
+        key_metrics: Sequence[str] = ("convex", "sharpe", "sortino", "profit_factor", "win_rate"),
+        sort_by: str = "convex",
+        ascending: bool = False,
+        **walk_forward_kwargs
     ) -> pd.DataFrame:
         """
-        Convenience method: run walk-forward on multiple signals and return
-        a comparison table of aggregated OOS metrics.
+        Run optimization for multiple signals and return a clean comparison table.
+
+        Returns:
+            DataFrame with one row per signal, columns = metrics + stability info
         """
+        if isinstance(signals, str):
+            signals = [signals]
+
         multi_results = self.rolling_walk_forward(
             signals=signals,
             stop_method=stop_method,
             param_grid=param_grid,
-            **walk_forward_kwargs,
+            **walk_forward_kwargs
         )
 
         rows = []
-        for sig, (oos_df, stability, _) in multi_results.items():
-            if oos_df is None or oos_df.empty:
+
+        for sig, (oos_df, stability, param_hist) in multi_results.items():
+            if oos_df.empty:
                 continue
 
             agg = oos_df.mean(numeric_only=True).to_dict()
-            agg["signal"] = sig
-            agg["n_segments_valid"] = stability.get("n_segments_valid", 0)
-            # Add more stability metrics if useful
-            rows.append(agg)
+            agg_median = oos_df.median(numeric_only=True).to_dict()
+
+            row = {
+                "signal": sig,
+                "n_segments": stability.get("n_segments_valid", 0),
+            }
+
+            # Core metrics - mean
+            for m in key_metrics:
+                if m in agg:
+                    row[f"{m}_mean"]   = agg[m]
+                if m in agg_median:
+                    row[f"{m}_median"] = agg_median[m]
+
+            # Stability (coefficient of variation for params)
+            for param, cv_key in [("window", "window_cv"), ("multiplier", "multiplier_cv")]:
+                if cv_key in stability:
+                    row[f"{param}_cv"] = stability[cv_key]
+
+            # Best param from last (or most frequent) segment - optional
+            if param_hist:
+                last_best = param_hist[-1]["params"]
+                row["last_window"]     = last_best.get("window")
+                row["last_multiplier"] = last_best.get("multiplier")
+
+            rows.append(row)
 
         if not rows:
             return pd.DataFrame()
 
-        return pd.DataFrame(rows).set_index("signal").sort_values("convex", ascending=False)
+        df = pd.DataFrame(rows).set_index("signal")
+
+        # Sort & round for readability
+        if sort_by in df.columns:
+            df = df.sort_values(sort_by, ascending=ascending)
+
+        numeric_cols = df.select_dtypes(include="number").columns
+        df[numeric_cols] = df[numeric_cols].round(4)
+
+        return df
 
 # class StrategyOptimizer:
 #     def __init__(self, data: pd.DataFrame, calculator: StopLossCalculator, equity_func):
