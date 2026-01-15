@@ -35,7 +35,7 @@ def plot_signal_bo(df, window, ticker, relative):
 
 def plot_signal_tt(df, fast, slow):
     
-    rg_cols = ['turtle_'+ str(sselow)+str(fast)]
+    rg_cols = ['turtle_'+ str(slow)+str(fast)]
 
     df[['close','turtle_'+ str(slow)+str(fast)] ].plot(
         secondary_y= rg_cols,figsize=(20,5), style=['k','b-.'], 
