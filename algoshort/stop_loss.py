@@ -1,19 +1,8 @@
 import pandas as pd
 import numpy as np
 from inspect import signature
+from typing import Any
 
-def _filter_kwargs(self, method_name: str, **kwargs) -> dict:
-    """Return only the kwargs that the target method actually accepts."""
-    method = getattr(self, method_name, None)
-    if not callable(method):
-        raise ValueError(f"Unknown method: {method_name}")
-    
-    sig = signature(method)
-    accepted = set(sig.parameters.keys())
-    # Remove 'self' if present
-    accepted.discard('self')
-    
-    return {k: v for k, v in kwargs.items() if k in accepted}
 
 class StopLossCalculator:
     """
@@ -60,6 +49,19 @@ class StopLossCalculator:
         # 3. Re-detect OHLC column names
         self._detect_ohlc_columns()
 
+    def _filter_kwargs(self, method_name: str, **kwargs) -> dict:
+        """Return only the kwargs that the target method actually accepts."""
+        method = getattr(self, method_name, None)
+        if not callable(method):
+            raise ValueError(f"Unknown method: {method_name}")
+        
+        sig = signature(method)
+        accepted = set(sig.parameters.keys())
+        # Remove 'self' if present
+        accepted.discard('self')
+        
+        return {k: v for k, v in kwargs.items() if k in accepted}
+
     def _detect_ohlc_columns(self):
         """Internal helper to detect column naming conventions."""
         absolute_cols = {'open': 'open', 'high': 'high', 'low': 'low', 'close': 'close'}
@@ -72,19 +74,63 @@ class StopLossCalculator:
         else:
             raise KeyError("Required OHLC columns not found in the provided DataFrame.")
 
-    def _atr(self, window: int = 14) -> pd.Series:
+    def _atr(self, window: Any = 14) -> pd.Series:
+        """
+        Calculate Average True Range (ATR) with caching.
+        
+        Args:
+            window: Period for the rolling mean (will be converted to int)
+        
+        Returns:
+            pd.Series: ATR values, indexed like the input price series
+        
+        Raises:
+            ValueError: If window cannot be converted to a positive integer
+        """
+        # Create cache key using the original window value (before conversion)
         cache_key = f"ATR_{window}"
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        high = self.data[self.price_cols['high']]
-        low = self.data[self.price_cols['low']]
-        close = self.data[self.price_cols['close']]
-        
-        tr = np.maximum(high - low, np.abs(high - close.shift()))
-        tr = np.maximum(tr, np.abs(low - close.shift()))
-        atr = tr.rolling(window=window).mean()
-        
+        # ─── Integer guard ────────────────────────────────────────────────
+        try:
+            window_int = int(window)           # convert to integer
+            if window_int < 1:
+                raise ValueError("window must be >= 1")
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"Invalid ATR window value: {window!r} "
+                f"(must be convertible to positive integer)"
+            ) from e
+
+        # Get price series (these are pandas Series)
+        high     = self._get_price_series('high')
+        low      = self._get_price_series('low')
+        close    = self._get_price_series('close')
+        close_prev = close.shift(1)
+
+        # True Range components – keep everything as pandas Series
+        tr_high_low     = high - low
+        tr_high_close   = (high - close_prev).abs()
+        tr_low_close    = (low  - close_prev).abs()
+
+        # Combine using pandas max (preserves Series + index)
+        tr = pd.DataFrame({
+            'hl':  tr_high_low,
+            'hc':  tr_high_close,
+            'lc':  tr_low_close
+        }).max(axis=1)
+
+        # Or more concise (still pandas):
+        # tr = pd.concat([tr_high_low, tr_high_close, tr_low_close], axis=1).max(axis=1)
+
+        # Rolling mean – now safe because tr is Series
+        atr = tr.rolling(
+            window=window_int,
+            min_periods=1
+        ).mean()
+
+        # Cache and return
         self._cache[cache_key] = atr
         return atr
 
@@ -124,6 +170,13 @@ class StopLossCalculator:
 
     def breakout_channel_stop_loss(self, signal: str, high_col: str = None, low_col: str = None, window: int = 20) -> pd.DataFrame:
         result_df = self.data.copy()
+        # Force conversion + validation
+        try:
+            window = int(window)
+            if window <= 0:
+                raise ValueError("window must be positive")
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid window value: {window!r} — must be positive integer")
         high = self._get_price_series('high', high_col)
         low = self._get_price_series('low', low_col)
         
@@ -218,6 +271,13 @@ class StopLossCalculator:
 
         # ← Key change here
         safe_kwargs = self._filter_kwargs(method_map[method].__name__, **kwargs)
+
+        if method in {'breakout_channel', 'support_resistance'}:
+            if 'window' in safe_kwargs:
+                try:
+                    safe_kwargs['window'] = int(safe_kwargs['window'])
+                except (TypeError, ValueError):
+                    raise ValueError(f"Invalid window for {method}: {safe_kwargs['window']!r}")
 
         return method_map[method](signal, **safe_kwargs)
     
