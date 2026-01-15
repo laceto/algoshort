@@ -1,5 +1,19 @@
 import pandas as pd
 import numpy as np
+from inspect import signature
+
+def _filter_kwargs(self, method_name: str, **kwargs) -> dict:
+    """Return only the kwargs that the target method actually accepts."""
+    method = getattr(self, method_name, None)
+    if not callable(method):
+        raise ValueError(f"Unknown method: {method_name}")
+    
+    sig = signature(method)
+    accepted = set(sig.parameters.keys())
+    # Remove 'self' if present
+    accepted.discard('self')
+    
+    return {k: v for k, v in kwargs.items() if k in accepted}
 
 class StopLossCalculator:
     """
@@ -190,15 +204,20 @@ class StopLossCalculator:
 
     def get_stop_loss(self, signal: str, method: str, **kwargs) -> pd.DataFrame:
         method_map = {
-            'fixed_percentage': self.fixed_percentage_stop_loss,
-            'atr': self.atr_stop_loss,
-            'breakout_channel': self.breakout_channel_stop_loss,
-            'moving_average': self.moving_average_stop_loss,
-            'volatility_std': self.volatility_std_stop_loss,
-            'support_resistance': self.support_resistance_stop_loss,
-            'classified_pivot': self.classified_pivot_stop_loss,
+            'fixed_percentage':     self.fixed_percentage_stop_loss,
+            'atr':                  self.atr_stop_loss,
+            'breakout_channel':     self.breakout_channel_stop_loss,
+            'support_resistance':   self.support_resistance_stop_loss,
+            'moving_average':       self.moving_average_stop_loss,
+            'volatility_std':       self.volatility_std_stop_loss,
+            # add others if needed
         }
-        if method in method_map:
-            return method_map[method](signal, **kwargs)
-        raise ValueError(f"Unknown stop-loss method: {method}")
+
+        if method not in method_map:
+            raise ValueError(f"Unknown stop-loss method: {method}. Available: {list(method_map)}")
+
+        # ← Key change here
+        safe_kwargs = self._filter_kwargs(method_map[method].__name__, **kwargs)
+
+        return method_map[method](signal, **safe_kwargs)
     
