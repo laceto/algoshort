@@ -4,30 +4,178 @@ from typing import Tuple, List, Dict, Any, Optional, Iterable, Union, Sequence
 import itertools
 from joblib import Parallel, delayed
 import os
-from tqdm import tqdm  # optional for progress
+from tqdm import tqdm
+
+import logging
+from algoshort.regime_fc import RegimeFC
+from algoshort.returns import ReturnsCalculator
+from algoshort.stop_loss import StopLossCalculator   # your stop-loss module
+from algoshort.position_sizing import PositionSizing  # your position sizing module
+from algoshort.utils import load_config
+
+def get_equity(
+    segment_df: pd.DataFrame,
+    signal: str = 'rrg',
+    segment_idx: int = 0,
+    config_path: str = 'config_regime.json',
+    price_col: str = 'close',
+    stop_method: str = 'atr',               # ← NEW: choose any supported method
+    inplace: bool = False,
+    **stop_kwargs: Any                      # ← NEW: method-specific kwargs
+) -> dict:
+    """
+    Process one segment independently with flexible stop-loss method.
+    
+    Args:
+        segment_df: Raw price data for this segment only
+        signal: Name of the signal column to create/use ('rrg')
+        segment_idx: For logging / filename
+        config_path: Path to regime config JSON
+        price_col: Main price column ('close', 'rclose', etc.)
+        stop_method: Stop-loss method to use (see StopLossCalculator for supported names)
+                     e.g. 'atr', 'fixed_percentage', 'breakout_channel', 'moving_average',
+                     'volatility_std', 'support_resistance', 'classified_pivot'
+        inplace: If True, modify segment_df; else work on copy (recommended False)
+        **stop_kwargs: Passed directly to the chosen stop-loss method
+                       e.g. window=14, multiplier=2.0, percentage=0.05, etc.
+    
+    Returns:
+        dict: Final equity metrics + metadata
+    """
+    if not os.path.isfile(config_path):
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    print(f"\n=== Processing segment {segment_idx} | signal='{signal}' | stop_method='{stop_method}' ===")
+    print(f"Input columns: {segment_df.columns.tolist()}")
+    print(f"Rows: {len(segment_df)}")
+    if stop_kwargs:
+        print(f"Stop-loss kwargs: {stop_kwargs}")
+
+    df = segment_df if inplace else segment_df.copy()
+
+    # 1. Compute signal column 'rrg'
+    config = load_config(config_path)
+    print("→ Computing signal 'rrg'...")
+    regime_fc = RegimeFC(df, logging.WARNING)
+    df = regime_fc.compute_regime(
+        relative=True,
+        lvl=config['regimes']['floor_ceiling']['lvl'],
+        vlty_n=config['regimes']['floor_ceiling']['vlty_n'],
+        threshold=config['regimes']['floor_ceiling']['threshold'],
+        dgt=config['regimes']['floor_ceiling']['dgt'],
+        d_vol=config['regimes']['floor_ceiling']['d_vol'],
+        dist_pct=config['regimes']['floor_ceiling']['dist_pct'],
+        retrace_pct=config['regimes']['floor_ceiling']['retrace_pct'],
+        r_vol=config['regimes']['floor_ceiling']['r_vol']
+    )
+
+    # if signal not in df.columns:
+    #     raise KeyError(f"Signal column '{signal}' was not created by RegimeFC")
+
+    # print(f"Signal '{signal}' value counts:\n{df[signal].value_counts()}")
+
+    # 2. Compute returns
+    print("→ Computing returns...")
+    returns_calc = ReturnsCalculator(ohlc_stock=df)
+    df = returns_calc.get_returns(
+        df=df,
+        signal='rrg',
+        relative=config['returns']['relative'],
+        inplace=False
+    )
+
+    # daily_change_col = f"{signal}_chg1D_fx"
+    # if daily_change_col not in df.columns:
+    #     raise KeyError(f"Daily change column '{daily_change_col}' not created")
+
+    # 3. Compute stop-loss using selected method + kwargs
+    print(f"→ Computing stop-loss using method '{stop_method}'...")
+    sl_calc = StopLossCalculator(df)
+    
+    df = sl_calc.get_stop_loss(
+        signal=signal,
+        method=stop_method,
+        **stop_kwargs  # ← passes all kwargs to the chosen method
+    )
+
+    stop_loss_col = f"{signal}_stop_loss"
+    if stop_loss_col not in df.columns:
+        raise KeyError(f"Stop-loss column '{stop_loss_col}' not created by method '{stop_method}'")
+    
+    # Reset index to ensure sequential 0-based indexing
+    df = df.reset_index(drop=True)  # ← ADD THIS LINE
+    # 4. Compute equity curves
+    print("→ Computing equity curves...")
+
+    pos = PositionSizing(
+        tolerance=-0.2,
+        mn=0.01,
+        mx=0.10,
+        equal_weight=0.25,
+        avg=0.05,
+        lot=100,
+        initial_capital=100000  # Optional, defaults to 100000
+    )
+
+# Calculate shares with custom column names
+    df = pos.calculate_shares(
+        df=df,
+        daily_chg=signal + '_chg1D_fx',
+        sl=stop_loss_col,
+        signal=signal,
+        close=price_col
+    )
+
+    # Save full output for inspection
+    output_file = f"segment_{segment_idx}_{signal}_{stop_method}_output.xlsx"
+    df.to_excel(output_file)
+    print(f"Saved full segment output: {output_file}")
+
+    # Extract final equity metrics (last row)
+    metrics_cols = ['date', signal + '_constant', signal + '_concave', signal + '_convex', signal + '_equal_weight']
+    available_cols = [col for col in metrics_cols if col in df.columns]
+
+    if not available_cols:
+        raise ValueError("No equity curve columns found after position sizing")
+
+    last_row = df[available_cols].iloc[-1].to_dict()
+
+    # Add useful metadata
+    last_row['segment_idx'] = segment_idx
+    last_row['start_date'] = df['date'].iloc[0]
+    last_row['end_date'] = df['date'].iloc[-1]
+    last_row['signal'] = signal
+    last_row['stop_method'] = stop_method
+    last_row['stop_kwargs'] = stop_kwargs
+    last_row['rows_processed'] = len(df)
+
+    print(f"Segment {segment_idx} final equity ({stop_method}):")
+    for k, v in last_row.items():
+        if k not in ['date', 'start_date', 'end_date', 'stop_kwargs']:
+            if isinstance(v, (int, float)):
+                print(f"  {k:12}: {v:,.2f}")
+            else:
+                print(f"  {k:12}: {v}")
+
+    return last_row
 
 
 def _worker_evaluate(
     segment_data: pd.DataFrame,
     signal: str,
-    stop_method: str,
-    close_col: str,
     segment_idx: int,
     param_kwargs: dict,
     equity_func: callable,
-    calc: 'StopLossCalculator',
+    config_path: str,  # ← NEW: pass path instead of dict
 ) -> dict:
-    """Standalone worker — avoids capturing class state (Windows pickling savior)."""
-    calc.data = segment_data.copy()  # defensive — segment might be view
-
-    df_with_stops = calc.get_stop_loss(
+    """Standalone worker — passes config_path to equity_func."""
+    metrics = equity_func(
+        segment_data,
         signal=signal,
-        method=stop_method,
-        price_col=close_col,
-        **param_kwargs,
+        segment_idx=segment_idx,
+        config_path=config_path,   # ← passed here
+        **param_kwargs
     )
-
-    metrics = equity_func(df_with_stops, signal, segment_idx, close_col)
 
     if isinstance(metrics, pd.Series):
         metrics = metrics.to_dict()
@@ -40,31 +188,32 @@ def _worker_evaluate(
 
 class StrategyOptimizer:
     """
-    Optimizer for parameter tuning of stop-loss strategies from StopLossCalculator
-    using in-sample grid search + out-of-sample walk-forward analysis.
+    Optimizer for parameter tuning — now uses config_path (JSON file path) instead of loaded dict.
     """
 
     def __init__(
         self,
         data: pd.DataFrame,
-        calculator: 'StopLossCalculator',
         equity_func: callable,
+        config_path: str,  # ← NEW: required path to config JSON
     ):
         """
         Args:
-            data: Full historical OHLC + signal DataFrame (index = time)
-            calculator: Initialized StopLossCalculator instance
-            equity_func: Callable that takes (df_with_stops, signal_col, segment_idx, close_col)
-                         and returns pd.Series or dict with performance metrics
+            data: Full historical OHLC DataFrame (index = time)
+            equity_func: Callable that takes (segment_df, signal, segment_idx, config_path, **param_kwargs)
+                         and returns dict with performance metrics + equity curves
+            config_path: Path to the regime configuration JSON file
         """
         if not isinstance(data, pd.DataFrame) or data.empty:
             raise ValueError("data must be a non-empty pandas DataFrame")
         if not callable(equity_func):
             raise TypeError("equity_func must be callable")
+        if not isinstance(config_path, str) or not os.path.isfile(config_path):
+            raise ValueError(f"config_path must be a valid file path: {config_path}")
 
-        self.data = data.copy()  # defensive copy
-        self.calc = calculator
+        self.data = data.copy()  # defensive
         self.equity_func = equity_func
+        self.config_path = config_path  # ← stored path
 
         self._last_oos_results: Optional[pd.DataFrame] = None
         self._last_stability: Optional[Dict[str, float]] = None
@@ -74,52 +223,42 @@ class StrategyOptimizer:
         self,
         segment_data: pd.DataFrame,
         signal: str,
-        stop_method: str,
-        close_col: str,
-        segment_idx: int = -1,
+        segment_idx: int,
         **param_kwargs: Any,
     ) -> Dict[str, Any]:
         """
-        Core evaluation step: set data → compute stops via get_stop_loss → run equity function.
+        Core evaluation: call equity_func with config_path.
         """
-        if not stop_method:
-            raise ValueError("stop_method must be specified")
-
-        self.calc.data = segment_data
-        print(f"Calling {stop_method} with kwargs: {param_kwargs}")
-        df_with_stops = self.calc.get_stop_loss(
+        metrics = self.equity_func(
+            segment_data,
             signal=signal,
-            method=stop_method,
-            price_col=close_col if stop_method in {"atr", "moving_average", "volatility_std", "fixed_percentage"} else None,
-            **param_kwargs,
+            segment_idx=segment_idx,
+            config_path=self.config_path,   # ← passed here
+            **param_kwargs
         )
-        metrics = self.equity_func(df_with_stops, signal, segment_idx, close_col)
         print(f"Signal: {signal} | Segment: {segment_idx} | Raw metrics from equity_func: {metrics}")
-        
-        # Normalize return type to dict
+
         if isinstance(metrics, pd.Series):
             metrics = metrics.to_dict()
         elif not isinstance(metrics, dict):
             raise TypeError("equity_func must return dict or pd.Series")
 
-        metrics.update(param_kwargs)  # add all params for tracking
+        metrics.update(param_kwargs)
         return metrics
 
     def run_grid_search(
         self,
         segment_data: pd.DataFrame,
         signal: str,
-        stop_method: str,
         param_grid: Dict[str, Iterable[Any]],
-        segment_idx: int = -1,
-        close_col: str = "close",
+        segment_idx: int,
         n_jobs: int = 1,
         progress: bool = False,
-        backend: str = "loky",               # NEW: configurable
-        prefer: str = "processes",           # NEW
+        backend: str = "loky",
+        prefer: str = "processes",
     ) -> pd.DataFrame:
         """
-        Grid search with Windows-friendly defaults.
+        Grid search — passes config_path to worker.
         """
         if not param_grid:
             raise ValueError("param_grid required")
@@ -129,34 +268,28 @@ class StrategyOptimizer:
             n_jobs = -1
 
         param_names = list(param_grid.keys())
-        param_values_lists = [list(v) for v in param_grid.values()]  # materialize
+        param_values_lists = [list(v) for v in param_grid.values()]
 
         all_combos = list(itertools.product(*param_values_lists))
 
         if not all_combos:
             return pd.DataFrame()
 
-        # Prepare tasks — pass self.calc explicitly
         tasks = [
             delayed(_worker_evaluate)(
                 segment_data=segment_data,
                 signal=signal,
-                stop_method=stop_method,
-                close_col=close_col,
                 segment_idx=segment_idx,
                 param_kwargs=dict(zip(param_names, combo)),
-                equity_func=self.equity_func,      # function reference — usually picklable
-                calc=self.calc,                    # pass instance explicitly
+                equity_func=self.equity_func,
+                config_path=self.config_path,   # ← passed to worker
             )
             for combo in all_combos
         ]
 
-        # Windows tip: try "threading" first if you get pickling errors
         effective_backend = backend
         if os.name == "nt" and backend == "loky":
-            # You can force threading here for debugging
-            # effective_backend = "threading"   # uncomment to test GIL-safe fallback
-            pass
+            pass  # keep or switch to threading if needed
 
         try:
             results = Parallel(
@@ -164,11 +297,10 @@ class StrategyOptimizer:
                 backend=effective_backend,
                 prefer=prefer,
                 verbose=10 if n_jobs > 1 else 0,
-                # timeout=600,                  # optional: kill hung workers after 10 min
             )(tasks)
         except Exception as e:
             if "pickle" in str(e).lower() and effective_backend == "loky":
-                print("Pickling error detected on Windows. Try backend='threading' or simplify equity_func.")
+                print("Pickling error on Windows. Try backend='threading'.")
             raise
 
         if not results:
@@ -280,10 +412,10 @@ class StrategyOptimizer:
             is_results = self.run_grid_search(
                 segment_data=is_data,
                 signal=signal,
-                stop_method=stop_method,
+                # stop_method=stop_method,
                 param_grid=param_grid,
                 segment_idx=i,
-                close_col=close_col,
+                # close_col=close_col,
                 n_jobs=n_jobs,
                 progress=progress,
                 backend="loky",
@@ -291,8 +423,8 @@ class StrategyOptimizer:
             )
             
             print(f"\n=== IS results for signal {signal} segment {i} ===")
-            print(is_results[["window", "multiplier", "convex"]].sort_values("convex", ascending=False).head(5))
-            print("Convex values unique:", is_results["convex"].unique())
+            print(is_results[["window", "multiplier", signal + "_convex"]].sort_values(signal + "_convex", ascending=False).head(5))
+            print("Convex values unique:", is_results[signal + "_convex"].unique())
 
             if is_results.empty:
                 continue
@@ -300,7 +432,7 @@ class StrategyOptimizer:
             # Pick best by opt_metric (ascending assumed)
             best = is_results.loc[is_results[opt_metric].idxmax()]
             best_params = {p: best[p] for p in param_grid}  # extract only grid params
-
+            print('qui')
             param_history.append({
                 "segment": i + 1,
                 "params": best_params,
@@ -392,13 +524,13 @@ class StrategyOptimizer:
 
         # Find peak at exact best_params
         mask = np.all([results[k] == v for k, v in best_params.items()], axis=0)
-        peak = results.loc[mask, "convex"]
+        peak = results.loc[mask, signal + "_convex"]
 
         if peak.empty:
             raise ValueError("Best parameters not found in sensitivity grid — check variance/rounding")
 
         peak_val = peak.iloc[0]
-        avg_val = results["convex"].mean()
+        avg_val = results[signal + "_convex"].mean()
 
         plateau_ratio_pct = (avg_val / peak_val) * 100 if peak_val != 0 else np.nan
 
@@ -478,90 +610,3 @@ class StrategyOptimizer:
 
         return df
 
-# class StrategyOptimizer:
-#     def __init__(self, data: pd.DataFrame, calculator: StopLossCalculator, equity_func):
-#         """
-#         Args:
-#             data: The full OHLC DataFrame.
-#             calculator: An instance of StopLossCalculator.
-#             equity_func: Your custom function that returns a 1-row, 4-col DataFrame.
-#         """
-#         self.data = data
-#         self.calc = calculator
-#         self.equity_func = equity_func
-#         self.optimization_results = pd.DataFrame()
-#         self.best_params = {}
-
-   
-#     def run_grid_search(self, is_data, signal, windows, multipliers, i, price_col = 'close'):
-#         """Performs a standard grid search on a specific data segment."""
-#         results = []
-#         self.calc.data = is_data
-        
-#         for w, m in itertools.product(windows, multipliers):
-#             temp_df = self.calc.atr_stop_loss(signal=signal, window=w, multiplier=m, price_col=price_col)
-#             row = self.equity_func(temp_df, signal, i, price_col = price_col)
-#             row.update({'window': w, 'multiplier': m})
-#             results.append(row)
-            
-#         return pd.DataFrame(results)
-
-#     def rolling_walk_forward(self, signal, close_col, windows, multipliers, n_segments=4):
-#         """Executes a rolling WFA and returns OOS metrics and parameter stability."""
-#         segment_size = len(self.data) // (n_segments + 1)
-#         print(f"Debug: Data Length: {len(self.data)}, Segments: {n_segments}")
-#         oos_results = []
-#         param_history = []
-
-#         for i in range(n_segments):
-#             # Define Splits
-#             is_data = self.data.iloc[i * segment_size : (i + 1) * segment_size]
-#             oos_data = self.data.iloc[(i + 1) * segment_size : (i + 2) * segment_size]
-
-#             # In-Sample Optimization
-#             is_df = self.run_grid_search(is_data, signal, windows, multipliers, i, price_col = close_col)
-#             best_row = is_df.sort_values('convex', ascending=False).iloc[0]
-            
-#             w_best, m_best = int(best_row['window']), best_row['multiplier']
-#             param_history.append({'segment': i+1, 'window': w_best, 'multiplier': m_best})
-
-#             # Out-of-Sample Validation
-#             self.calc.data = oos_data
-#             final_oos = self.calc.atr_stop_loss(signal, window=w_best, multiplier=m_best, price_col=close_col)
-#             oos_metrics = self.equity_func(final_oos, signal, i, close_col)
-#             oos_metrics['segment'] = i + 1
-#             # oos_metrics.to_excel(str(i+'output.xlsx'))
-#             # oos_metrics['w_best'] = w_best
-#             # oos_metrics['m_best'] = m_best
-#             oos_results.append(oos_metrics)
-
-#             # # Update the placeholder every loop
-#             # self.final_best_params = {
-#             #     'window': w_best,
-#             #     'multiplier': m_best,
-#             #     'segment_index': i
-#             # }
-
-#         # Calculate Stability
-#         history_df = pd.DataFrame(param_history)
-#         stability = {
-#             'window_cv': history_df['window'].std() / history_df['window'].mean(),
-#             'multiplier_cv': history_df['multiplier'].std() / history_df['multiplier'].mean()
-#         }
-        
-#         # return pd.DataFrame(oos_results)
-#         return pd.DataFrame(oos_results), stability, param_history
-
-#     def sensitivity_analysis(self, signal, best_w, best_m, variance=0.2):
-#         """Tests the 'plateau' around the optimal parameters."""
-#         w_range = [int(best_w * r) for r in [1-variance, 1, 1+variance]]
-#         m_range = [round(best_m * r, 2) for r in [1-variance, 1, 1+variance]]
-        
-#         # Test on full data
-#         self.calc.data = self.data
-#         results = self.run_grid_search(self.data, signal, w_range, m_range)
-        
-#         peak_equity = results[(results['window']==best_w) & (results['multiplier']==best_m)]['convex'].iloc[0]
-#         avg_equity = results['convex'].mean()
-        
-#         return (avg_equity / peak_equity) * 100, results
