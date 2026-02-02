@@ -50,7 +50,7 @@ class ReturnsCalculator:
         
         return tuple(ohlc)
 
-    def get_returns(self, df: pd.DataFrame, signal: str,  relative: bool = False, inplace: bool = False) -> pd.DataFrame:
+    def get_returns(self, df: pd.DataFrame, signal: str, relative: bool = False, inplace: bool = False) -> pd.DataFrame:
         """
         Calculates returns based on a regime signal, including daily changes, cumulative returns, and stop-loss levels.
 
@@ -61,18 +61,11 @@ class ReturnsCalculator:
             inplace (bool): If True, modify input DataFrame; else return a new one. Defaults to False.
 
         Returns:
-            pd.DataFrame: DataFrame with additional columns:
-                - '<signal>_chg1D': Daily price change based on lagged signal.
-                - '<signal>_chg1D_fx': Duplicate of daily price change (for compatibility).
-                - '<signal>_PL_cum': Cumulative sum of daily price changes.
-                - '<signal>_returns': Daily percentage returns based on lagged signal.
-                - '<signal>_log_returns': Daily log returns based on lagged signal.
-                - '<signal>_cumul': Cumulative returns from log returns (exp(cumsum(log_returns)) - 1).
-                - 'stop_loss': Rolling min low (long) or max high (short) based on signal, NaN otherwise.
+            pd.DataFrame: DataFrame with additional columns.
 
         Raises:
-            KeyError: If required columns ('close'/'r_close', 'high'/'r_high', 'low'/'r_low', signal) are missing.
-            ValueError: If DataFrame is empty,  or data types are non-numeric.
+            KeyError: If required columns are missing.
+            ValueError: If DataFrame is empty or data types are non-numeric.
         """
         try:
             # Validate inputs
@@ -88,35 +81,47 @@ class ReturnsCalculator:
             
             # Validate numeric data
             if not np.issubdtype(df[_c].dtype, np.number) or \
-               not np.issubdtype(df[_h].dtype, np.number) or \
-               not np.issubdtype(df[_l].dtype, np.number) or \
-               not np.issubdtype(df[signal].dtype, np.number):
+            not np.issubdtype(df[_h].dtype, np.number) or \
+            not np.issubdtype(df[_l].dtype, np.number) or \
+            not np.issubdtype(df[signal].dtype, np.number):
                 raise ValueError("OHLC and signal columns must contain numeric data.")
 
-            # Create working DataFrame
+            # Work on copy if not inplace
             result_df = df if inplace else df.copy()
-
+            
             # Fill NaN in signal column with 0
-            result_df[signal] = result_df[signal].fillna(0)
-
+            signal_filled = result_df[signal].fillna(0)
+            
+            # Pre-compute reusable intermediate values
+            close_prices = result_df[_c]
+            price_diff = close_prices.diff()
+            lagged_signal = signal_filled.shift()
+            
             # Calculate daily price changes
-            price_diff = result_df[_c].diff()
-            lagged_signal = result_df[signal].shift()
-            result_df[f'{signal}_chg1D'] = price_diff * lagged_signal
-            result_df[f'{signal}_chg1D_fx'] = price_diff * lagged_signal  # Duplicate for compatibility
-
-            # Cumulative price changes
-            result_df[f'{signal}_PL_cum'] = result_df[f'{signal}_chg1D'].cumsum()
-            result_df[f'{signal}_PL_cum_fx'] = result_df[f'{signal}_chg1D_fx'].cumsum()
-
-            # Percentage and log returns
-            result_df[f'{signal}_returns'] = result_df[_c].pct_change() * lagged_signal
-            result_df[f'{signal}_log_returns'] = np.log(result_df[_c] / result_df[_c].shift()) * lagged_signal
-
-            # Cumulative returns from log returns
-            result_df[f'{signal}_cumul'] = result_df[f'{signal}_log_returns'].cumsum().apply(np.exp) - 1
-
-
+            chg1D = price_diff * lagged_signal
+            
+            # Calculate returns
+            pct_returns = close_prices.pct_change() * lagged_signal
+            log_returns = np.log(close_prices / close_prices.shift()) * lagged_signal
+            
+            # Build new columns DataFrame
+            new_columns_df = pd.DataFrame({
+                f'{signal}_chg1D': chg1D,
+                f'{signal}_chg1D_fx': chg1D,
+                f'{signal}_PL_cum': chg1D.cumsum(),
+                f'{signal}_PL_cum_fx': chg1D.cumsum(),
+                f'{signal}_returns': pct_returns,
+                f'{signal}_log_returns': log_returns,
+                f'{signal}_cumul': np.exp(log_returns.cumsum()) - 1
+            }, index=result_df.index)
+            
+            # SINGLE BATCH ASSIGNMENT - NO FRAGMENTATION
+            # Using concat with axis=1 to add all columns at once
+            result_df = pd.concat([result_df, new_columns_df], axis=1)
+            
+            # Update signal column (fillna)
+            result_df[signal] = signal_filled
+            
             return result_df
 
         except Exception as e:

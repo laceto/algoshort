@@ -6,6 +6,7 @@ from algoshort.utils import load_config, extract_signal_name
 from algoshort.returns import ReturnsCalculator
 from algoshort.strategy_metrics import StrategyMetrics
 import warnings
+from algoshort.stop_loss import StopLossCalculator   # your stop-loss module
 
 def calculate_trading_edge(
         stock_data: pd.DataFrame,
@@ -137,7 +138,7 @@ def calculate_risk_metrics(
 def calculate_return(
         stock_data: pd.DataFrame,
         signal_columns,
-        config_path: str = './config.json'
+        relative: bool = True
 ) -> tuple[pd.DataFrame, list]:
     """
     Calculate returns for each signal using ReturnsCalculator.
@@ -154,8 +155,7 @@ def calculate_return(
         ValueError: If required columns or signals are missing.
     """
     
-    # Load config
-    config = load_config(config_path)
+
     
     # Get signal names
     signal_names = signal_columns
@@ -173,16 +173,130 @@ def calculate_return(
         stock_data = returns_calc.get_returns(
             df=stock_data,
             signal=signal,
-            relative=config['returns']['relative'],
+            relative=relative,
             inplace=True
         )
     
     return stock_data
 
+def calculate_sl_signals(
+        df, 
+        signal_columns,
+        stop_method: str,
+        **stop_kwargs
+        ):
+    
+    sl_calc = StopLossCalculator(df)
+    for signal in signal_columns:
+        df = sl_calc.get_stop_loss(
+            signal=signal,
+            method=stop_method,
+            **stop_kwargs  # ← passes all kwargs to the chosen method
+        )
+        sl_calc.data = df
+    
+    return df
+
+
+def multiple_fc_signals(
+        config_path: str,
+        df: pd.DataFrame,
+        relative: bool = True
+        ):
+    
+    # regime_fc = RegimeFC(df=df)
+    # print(*search_space.values())
+    # for lvl_val, vlty_n_val, threshold_val, d_vol_val, dist_pct_val, retrace_pct_val, r_vol_val in zip(*search_space.values()):
+    #     # print(f"Index Match -> short: {w_val}, long: {m_val}")
+    #     df = regime_fc.compute_regime(
+    #         relative = relative,
+    #         lvl = lvl_val,
+    #         vlty_n = vlty_n_val,
+    #         threshold = threshold_val,
+    #         dgt = 3,
+    #         d_vol = d_vol_val,
+    #         dist_pct = dist_pct_val,
+    #         retrace_pct = retrace_pct_val,
+    #         r_vol = r_vol_val
+    #     )
+    config = load_config(config_path)
+
+    regime_fc = RegimeFC(df=df)
+    df = regime_fc.compute_regime(
+        relative = relative,
+        lvl = config['regimes']['floor_ceiling']['lvl'],
+        vlty_n = config['regimes']['floor_ceiling']['vlty_n'],
+        threshold = config['regimes']['floor_ceiling']['threshold'],
+        dgt = config['regimes']['floor_ceiling']['dgt'],
+        d_vol = config['regimes']['floor_ceiling']['d_vol'],
+        dist_pct = config['regimes']['floor_ceiling']['dist_pct'],
+        retrace_pct = config['regimes']['floor_ceiling']['retrace_pct'],
+        r_vol = config['regimes']['floor_ceiling']['r_vol']
+    )
+        
+    return df
+
+def multiple_tt_signals(
+        search_space : dict,
+        df: pd.DataFrame,
+        relative: bool = True
+        ):
+    
+    regime_bo = RegimeBO(ohlc_stock=df)
+
+    for w_val, m_val in zip(*search_space.values()):
+        print(f"Index Match -> short: {w_val}, long: {m_val}")
+        df = regime_bo.compute_regime(regime_type='turtle', fast_window=w_val,
+                                window=m_val,
+                                relative=relative, inplace=True)
+        
+    return df
+
+def multiple_bo_signals(
+        search_space,
+        df: pd.DataFrame,
+        relative: bool = True
+        ):
+    
+    regime_bo = RegimeBO(ohlc_stock=df)
+
+    for w_val in search_space:
+        print(f"Index Match -> Window: {w_val}")
+        df = regime_bo.compute_regime(regime_type='breakout', window=w_val,
+                             relative=relative, inplace=True)
+        
+    return df
+
+def multiple_ma_signals(
+        search_space,
+        df: pd.DataFrame,
+        relative: bool = True
+        ):
+    
+    regime_ma = TripleMACrossoverRegime(ohlc_stock=df)
+
+    for ma_type in ['sma', 'ema']:
+        for s_val, m_val, l_val in zip(*search_space.values()):
+            print(f"Index Match -> short: {s_val}, medium: {m_val}, long: {l_val}")
+            regime_ma.compute_ma_regime(
+                ma_type=ma_type,
+                short_window=s_val,
+                medium_window=m_val,
+                long_window=l_val,
+                relative=relative,
+                inplace=True
+            )    
+        
+    return df
+
 def generate_signals(
         df: pd.DataFrame, 
+        tt_search_space: dict,
+        bo_search_space: dict,
+        ma_search_space:dict,
+        # fc_search_space:dict,
         config_path='./config.json',
-        relative: bool = True
+        relative: bool = True,
         ) -> tuple[pd.DataFrame, list]:
     """
     Generates signals for breakout, Turtle Trader, and MA crossover regimes.
@@ -199,39 +313,18 @@ def generate_signals(
     Raises:
         ValueError: If input DataFrame is missing required columns or config is invalid.
     """
-    regime_bo = RegimeBO(ohlc_stock=df)
-    regime_ma = TripleMACrossoverRegime(ohlc_stock=df)
+    # regime_bo = RegimeBO(ohlc_stock=df)
+    # regime_ma = TripleMACrossoverRegime(ohlc_stock=df)
 
-    config = load_config(config_path)
+    # config = load_config(config_path)
 
-    regime_bo.compute_regime(regime_type='breakout', window=config['regimes']['breakout']['bo_window'],
-                             relative=relative, inplace=True)
-    regime_bo.compute_regime(regime_type='turtle', fast_window=config['regimes']['turtle']['fast_window'],
-                             window=config['regimes']['turtle']['slow_window'],
-                             relative=relative, inplace=True)
+    df = multiple_bo_signals(search_space=bo_search_space, df=df, relative=relative)
+    
+    df = multiple_tt_signals(search_space=tt_search_space, df=df, relative=relative)
 
-    for ma_type in config['regimes']['ma_crossover']['ma_type']:
-        regime_ma.compute_ma_regime(
-            ma_type=ma_type,
-            short_window=config['regimes']['ma_crossover']['short_window'],
-            medium_window=config['regimes']['ma_crossover']['medium_window'],
-            long_window=config['regimes']['ma_crossover']['long_window'],
-            relative=relative,
-            inplace=True
-        )
+    df = multiple_ma_signals(search_space=ma_search_space,df=df,relative=relative)
 
-    regime_fc = RegimeFC(df=df)
-    df = regime_fc.compute_regime(
-        relative = relative,
-        lvl = config['regimes']['floor_ceiling']['lvl'],
-        vlty_n = config['regimes']['floor_ceiling']['vlty_n'],
-        threshold = config['regimes']['floor_ceiling']['threshold'],
-        dgt = config['regimes']['floor_ceiling']['dgt'],
-        d_vol = config['regimes']['floor_ceiling']['d_vol'],
-        dist_pct = config['regimes']['floor_ceiling']['dist_pct'],
-        retrace_pct = config['regimes']['floor_ceiling']['retrace_pct'],
-        r_vol = config['regimes']['floor_ceiling']['r_vol']
-    )
+    df = multiple_fc_signals(config_path,df,relative)
     
     # Get signal column names
     signal_names = extract_signal_name(config_path)
@@ -248,5 +341,8 @@ def generate_signals(
         item for item in signal_columns
         if not any(keyword in item for keyword in ['short', 'medium', 'long'])
     ]
+
+    signal_columns = [x for x in signal_columns if x != "rrg_ch"]
+
 
     return df, signal_columns

@@ -15,7 +15,7 @@ from algoshort.utils import load_config
 
 def get_equity(
     segment_df: pd.DataFrame,
-    signal: str = 'rrg',
+    # signal: str = 'rrg',
     segment_idx: int = 0,
     config_path: str = 'config_regime.json',
     price_col: str = 'close',
@@ -45,7 +45,7 @@ def get_equity(
     if not os.path.isfile(config_path):
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
-    print(f"\n=== Processing segment {segment_idx} | signal='{signal}' | stop_method='{stop_method}' ===")
+    print(f"\n=== Processing segment {segment_idx} |  stop_method='{stop_method}' ===")
     print(f"Input columns: {segment_df.columns.tolist()}")
     print(f"Rows: {len(segment_df)}")
     if stop_kwargs:
@@ -69,6 +69,8 @@ def get_equity(
         r_vol=config['regimes']['floor_ceiling']['r_vol']
     )
 
+    signal = 'rrg'
+
     # if signal not in df.columns:
     #     raise KeyError(f"Signal column '{signal}' was not created by RegimeFC")
 
@@ -79,8 +81,8 @@ def get_equity(
     returns_calc = ReturnsCalculator(ohlc_stock=df)
     df = returns_calc.get_returns(
         df=df,
-        signal='rrg',
-        relative=config['returns']['relative'],
+        signal=signal,
+        relative=True,
         inplace=False
     )
 
@@ -162,7 +164,7 @@ def get_equity(
 
 def _worker_evaluate(
     segment_data: pd.DataFrame,
-    signal: str,
+    # signal: str,
     segment_idx: int,
     param_kwargs: dict,
     equity_func: callable,
@@ -171,7 +173,7 @@ def _worker_evaluate(
     """Standalone worker — passes config_path to equity_func."""
     metrics = equity_func(
         segment_data,
-        signal=signal,
+        # signal=signal,
         segment_idx=segment_idx,
         config_path=config_path,   # ← passed here
         **param_kwargs
@@ -222,7 +224,7 @@ class StrategyOptimizer:
     def _evaluate_params(
         self,
         segment_data: pd.DataFrame,
-        signal: str,
+        # signal: str,
         segment_idx: int,
         **param_kwargs: Any,
     ) -> Dict[str, Any]:
@@ -231,12 +233,12 @@ class StrategyOptimizer:
         """
         metrics = self.equity_func(
             segment_data,
-            signal=signal,
+            # signal=signal,
             segment_idx=segment_idx,
             config_path=self.config_path,   # ← passed here
             **param_kwargs
         )
-        print(f"Signal: {signal} | Segment: {segment_idx} | Raw metrics from equity_func: {metrics}")
+        print(f" Segment: {segment_idx} | Raw metrics from equity_func: {metrics}")
 
         if isinstance(metrics, pd.Series):
             metrics = metrics.to_dict()
@@ -249,7 +251,7 @@ class StrategyOptimizer:
     def run_grid_search(
         self,
         segment_data: pd.DataFrame,
-        signal: str,
+        # signal: str,
         param_grid: Dict[str, Iterable[Any]],
         segment_idx: int,
         n_jobs: int = 1,
@@ -278,7 +280,7 @@ class StrategyOptimizer:
         tasks = [
             delayed(_worker_evaluate)(
                 segment_data=segment_data,
-                signal=signal,
+                # signal=signal,
                 segment_idx=segment_idx,
                 param_kwargs=dict(zip(param_names, combo)),
                 equity_func=self.equity_func,
@@ -310,7 +312,7 @@ class StrategyOptimizer:
 
     def rolling_walk_forward(
         self,
-        signals: Union[str, Sequence[str]],
+        # signals: Union[str, Sequence[str]],
         stop_method: str,
         param_grid: Dict[str, Iterable[Any]],
         close_col: str = "close",
@@ -329,47 +331,66 @@ class StrategyOptimizer:
         Returns:
             Dict[sig_name → (oos_df, stability_dict, param_history_list)]
         """
-        if isinstance(signals, str):
-            signals = [signals]
+        # if isinstance(signals, str):
+        #     signals = [signals]
 
-        if not all(isinstance(s, str) for s in signals):
-            raise TypeError("signals must be str or sequence of str")
+        # if not all(isinstance(s, str) for s in signals):
+        #     raise TypeError("signals must be str or sequence of str")
 
-        missing = [s for s in signals if s not in self.data.columns]
-        if missing:
-            raise KeyError(f"Signal columns not found in data: {missing}")
+        # missing = [s for s in signals if s not in self.data.columns]
+        # if missing:
+        #     raise KeyError(f"Signal columns not found in data: {missing}")
 
-        results = {}
+        # results = {}
 
-        for sig in signals:
-            if verbose:
-                print(f"\n=== Processing signal: {sig} ===")
+        oos_df, stability, history = self._single_rolling_walk_forward(
+                        # signal=sig,
+                        stop_method=stop_method,
+                        param_grid=param_grid,
+                        close_col=close_col,
+                        n_segments=n_segments,
+                        n_jobs=n_jobs,
+                        progress=progress,
+                        verbose=verbose,
+                        opt_metric=opt_metric,
+                    )
 
-            # Inner call to perform single-signal WFA
-            oos_df, stability, history = self._single_rolling_walk_forward(
-                signal=sig,
-                stop_method=stop_method,
-                param_grid=param_grid,
-                close_col=close_col,
-                n_segments=n_segments,
-                n_jobs=n_jobs,
-                progress=progress,
-                verbose=verbose,
-                opt_metric=opt_metric,
-            )
+        results = (oos_df, stability, history)
 
-            results[sig] = (oos_df, stability, history)
+        if verbose:
+                        print(f"  → Stability: {stability}")
+                        if oos_df is not None and not oos_df.empty:
+                            print(f"  → OOS rows: {len(oos_df)}, mean {opt_metric}: {oos_df[opt_metric].mean():.4f}")
 
-            if verbose:
-                print(f"  → Stability: {stability}")
-                if oos_df is not None and not oos_df.empty:
-                    print(f"  → OOS rows: {len(oos_df)}, mean {opt_metric}: {oos_df[opt_metric].mean():.4f}")
+        # for sig in signals:
+        #     if verbose:
+        #         print(f"\n=== Processing signal: {sig} ===")
+
+        #     # Inner call to perform single-signal WFA
+        #     oos_df, stability, history = self._single_rolling_walk_forward(
+        #         # signal=sig,
+        #         stop_method=stop_method,
+        #         param_grid=param_grid,
+        #         close_col=close_col,
+        #         n_segments=n_segments,
+        #         n_jobs=n_jobs,
+        #         progress=progress,
+        #         verbose=verbose,
+        #         opt_metric=opt_metric,
+        #     )
+
+        #     results[sig] = (oos_df, stability, history)
+
+        #     if verbose:
+        #         print(f"  → Stability: {stability}")
+        #         if oos_df is not None and not oos_df.empty:
+        #             print(f"  → OOS rows: {len(oos_df)}, mean {opt_metric}: {oos_df[opt_metric].mean():.4f}")
 
         return results
 
     def _single_rolling_walk_forward(
         self,
-        signal: str,
+        # signal: str,
         stop_method: str,
         param_grid: Dict[str, Iterable[Any]],
         close_col: str = "close",
@@ -411,7 +432,7 @@ class StrategyOptimizer:
             # In-sample optimization
             is_results = self.run_grid_search(
                 segment_data=is_data,
-                signal=signal,
+                # signal=signal,
                 # stop_method=stop_method,
                 param_grid=param_grid,
                 segment_idx=i,
@@ -422,9 +443,9 @@ class StrategyOptimizer:
                 prefer="processes",
             )
             
-            print(f"\n=== IS results for signal {signal} segment {i} ===")
-            print(is_results[["window", "multiplier", signal + "_convex"]].sort_values(signal + "_convex", ascending=False).head(5))
-            print("Convex values unique:", is_results[signal + "_convex"].unique())
+            print(f"\n=== IS results for segment {i} ===")
+            # print(is_results[["window", "multiplier", signal + "_convex"]].sort_values(signal + "_convex", ascending=False).head(5))
+            # print("Convex values unique:", is_results[signal + "_convex"].unique())
 
             if is_results.empty:
                 continue
@@ -442,7 +463,7 @@ class StrategyOptimizer:
             # Out-of-sample evaluation with best params
             oos_row = self._evaluate_params(
                 segment_data=oos_data,
-                signal=signal,
+                # signal=signal,
                 stop_method=stop_method,
                 close_col=close_col,
                 segment_idx=i,
@@ -481,7 +502,7 @@ class StrategyOptimizer:
 
     def sensitivity_analysis(
         self,
-        signal: str,
+        # signal: str,
         stop_method: str,
         best_params: Dict[str, Any],
         close_col: str = "close",
@@ -512,7 +533,7 @@ class StrategyOptimizer:
 
         results = self.run_grid_search(
             segment_data=self.data,
-            signal=signal,
+            # signal=signal,
             stop_method=stop_method,
             param_grid=param_grid,
             close_col=close_col,
@@ -524,13 +545,13 @@ class StrategyOptimizer:
 
         # Find peak at exact best_params
         mask = np.all([results[k] == v for k, v in best_params.items()], axis=0)
-        peak = results.loc[mask, signal + "_convex"]
+        peak = results.loc[mask, "convex"]
 
         if peak.empty:
             raise ValueError("Best parameters not found in sensitivity grid — check variance/rounding")
 
         peak_val = peak.iloc[0]
-        avg_val = results[signal + "_convex"].mean()
+        avg_val = results["convex"].mean()
 
         plateau_ratio_pct = (avg_val / peak_val) * 100 if peak_val != 0 else np.nan
 
@@ -609,4 +630,3 @@ class StrategyOptimizer:
         df[numeric_cols] = df[numeric_cols].round(4)
 
         return df
-

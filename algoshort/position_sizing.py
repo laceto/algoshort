@@ -223,8 +223,9 @@ class PositionSizing:
         dict or None
             Dictionary with updated share values, or None if no recalculation needed
         """
-        if not ((df.at[i-1, signal] == 0) and (df.at[i, signal] != 0)):
-            return None
+        # if not ((df.at[i-1, signal] == 0) and (df.at[i, signal] != 0)):
+        #     return None
+        if df.at[i, signal] == df.at[i-1, signal]: return None
         
         px = df.at[i, close]
         sl_price = df.at[i, sl]
