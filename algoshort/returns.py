@@ -61,11 +61,26 @@ class ReturnsCalculator:
             inplace (bool): If True, modify input DataFrame; else return a new one. Defaults to False.
 
         Returns:
+<<<<<<< HEAD
             pd.DataFrame: DataFrame with additional columns.
 
         Raises:
             KeyError: If required columns are missing.
             ValueError: If DataFrame is empty or data types are non-numeric.
+=======
+            pd.DataFrame: DataFrame with additional columns:
+                - '<signal>_chg1D': Daily price change based on lagged signal.
+                - '<signal>_chg1D_fx': Duplicate of daily price change (for compatibility).
+                - '<signal>_PL_cum': Cumulative sum of daily price changes.
+                - '<signal>_PL_cum_fx': Duplicate of cumulative price changes (for compatibility).
+                - '<signal>_returns': Daily percentage returns based on lagged signal.
+                - '<signal>_log_returns': Daily log returns based on lagged signal.
+                - '<signal>_cumul': Cumulative returns from log returns (exp(cumsum(log_returns)) - 1).
+
+        Raises:
+            KeyError: If required columns ('close'/'r_close', 'high'/'r_high', 'low'/'r_low', signal) are missing.
+            ValueError: If DataFrame is empty, or data types are non-numeric.
+>>>>>>> 2a1e67377153da372d2b39f45c33c88b3cd54e31
         """
         try:
             # Validate inputs
@@ -104,24 +119,27 @@ class ReturnsCalculator:
             pct_returns = close_prices.pct_change() * lagged_signal
             log_returns = np.log(close_prices / close_prices.shift()) * lagged_signal
             
-            # Build new columns DataFrame
-            new_columns_df = pd.DataFrame({
+            # Build new columns dictionary (avoids fragmentation)
+            new_columns = {
                 f'{signal}_chg1D': chg1D,
-                f'{signal}_chg1D_fx': chg1D,
+                f'{signal}_chg1D_fx': chg1D,  # Duplicate for compatibility
                 f'{signal}_PL_cum': chg1D.cumsum(),
-                f'{signal}_PL_cum_fx': chg1D.cumsum(),
+                f'{signal}_PL_cum_fx': chg1D.cumsum(),  # Duplicate for compatibility
                 f'{signal}_returns': pct_returns,
                 f'{signal}_log_returns': log_returns,
-                f'{signal}_cumul': np.exp(log_returns.cumsum()) - 1
-            }, index=result_df.index)
+                f'{signal}_cumul': np.exp(log_returns.cumsum()) - 1  # Vectorized exp, no apply
+            }
             
-            # SINGLE BATCH ASSIGNMENT - NO FRAGMENTATION
-            # Using concat with axis=1 to add all columns at once
-            result_df = pd.concat([result_df, new_columns_df], axis=1)
-            
-            # Update signal column (fillna)
-            result_df[signal] = signal_filled
-            
+            # Single assignment operation using assign (prevents fragmentation)
+            if inplace:
+                # For inplace, update signal column first, then assign new columns
+                result_df[signal] = signal_filled
+                for col_name, col_data in new_columns.items():
+                    result_df[col_name] = col_data
+            else:
+                # For non-inplace, use assign for cleaner code
+                result_df = result_df.assign(**{signal: signal_filled, **new_columns})
+
             return result_df
 
         except Exception as e:
