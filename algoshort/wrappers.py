@@ -7,6 +7,7 @@ from algoshort.returns import ReturnsCalculator
 from algoshort.strategy_metrics import StrategyMetrics
 import warnings
 from algoshort.stop_loss import StopLossCalculator   # your stop-loss module
+import logging
 
 def calculate_trading_edge(
         stock_data: pd.DataFrame,
@@ -221,7 +222,7 @@ def multiple_fc_signals(
     #     )
     config = load_config(config_path)
 
-    regime_fc = RegimeFC(df=df)
+    regime_fc = RegimeFC(df=df, log_level=logging.WARNING)
     df = regime_fc.compute_regime(
         relative = relative,
         lvl = config['regimes']['floor_ceiling']['lvl'],
@@ -245,7 +246,7 @@ def multiple_tt_signals(
     regime_bo = RegimeBO(ohlc_stock=df)
 
     for w_val, m_val in zip(*search_space.values()):
-        print(f"Index Match -> short: {w_val}, long: {m_val}")
+        # print(f"Index Match -> short: {w_val}, long: {m_val}")
         df = regime_bo.compute_regime(regime_type='turtle', fast_window=w_val,
                                 window=m_val,
                                 relative=relative, inplace=True)
@@ -261,7 +262,7 @@ def multiple_bo_signals(
     regime_bo = RegimeBO(ohlc_stock=df)
 
     for w_val in search_space:
-        print(f"Index Match -> Window: {w_val}")
+        # print(f"Index Match -> Window: {w_val}")
         df = regime_bo.compute_regime(regime_type='breakout', window=w_val,
                              relative=relative, inplace=True)
         
@@ -277,7 +278,7 @@ def multiple_ma_signals(
 
     for ma_type in ['sma', 'ema']:
         for s_val, m_val, l_val in zip(*search_space.values()):
-            print(f"Index Match -> short: {s_val}, medium: {m_val}, long: {l_val}")
+            # print(f"Index Match -> short: {s_val}, medium: {m_val}, long: {l_val}")
             regime_ma.compute_ma_regime(
                 ma_type=ma_type,
                 short_window=s_val,
@@ -327,12 +328,12 @@ def generate_signals(
     df = multiple_fc_signals(config_path,df,relative)
     
     # Get signal column names
-    signal_names = extract_signal_name(config_path)
+    # signal_names = extract_signal_name(config_path)
     
-    # Verify signal columns exist
-    missing_signals = [name for name in signal_names if name not in df.columns]
-    if missing_signals:
-        warnings.warn(f"Signal columns not generated: {missing_signals}", UserWarning)
+    # # Verify signal columns exist
+    # missing_signals = [name for name in signal_names if name not in df.columns]
+    # if missing_signals:
+    #     warnings.warn(f"Signal columns not generated: {missing_signals}", UserWarning)
     
     # Select signal columns dynamically
     signal_columns = [col for col in df.columns if any(col.startswith(prefix) for prefix in ['rbo_', 'bo_', 'rtt_', 'tt_', 'rsma_', 'sma_', 'rema_', 'ema_', 'rg', 'rrg'])]
@@ -341,7 +342,7 @@ def generate_signals(
         item for item in signal_columns
         if not any(keyword in item for keyword in ['short', 'medium', 'long'])
     ]
-
+    # Remove 'rrg_ch' if present
     signal_columns = [x for x in signal_columns if x != "rrg_ch"]
 
 
