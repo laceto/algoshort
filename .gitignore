@@ -38,3 +38,8 @@ test_regime_fc.ipynb
 config.json
 
 data/
+
+*.xls
+*.xlsx
+*.xlsm
+*.xlsb
