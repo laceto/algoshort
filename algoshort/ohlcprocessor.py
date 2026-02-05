@@ -1,127 +1,327 @@
 import pandas as pd
-import yfinance as yf
 import logging
+from dataclasses import dataclass
+from typing import Optional
 
-# Configure logging for better feedback
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure module-level logging - let application configure handlers
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class OHLCColumns:
+    """Configuration for OHLC column naming conventions."""
+    open: str = 'open'
+    high: str = 'high'
+    low: str = 'low'
+    close: str = 'close'
+    date: str = 'date'
+
 
 class OHLCProcessor:
     """
-    A class to process OHLC data.
+    Processes OHLC (Open, High, Low, Close) financial data.
     
-    Data acquisition methods (`download_data` and `get_ohlc_data`) have been removed,
-    and this class now focuses purely on processing the data passed to it.
+    Primary responsibility: Calculate relative prices of an asset
+    against a benchmark index/security.
     """
-    def __init__(self):
-        """Initializes the OHLCProcessor."""
-        pass
-
-    def _calculate_relative(self, df: pd.DataFrame, _o: str, _h: str, _l: str, _c: str, bm_df: pd.DataFrame, bm_col: str, dgt: int, rebase: bool = True) -> pd.DataFrame:
-        '''
-        Calculates relative prices of an OHLC dataset against a benchmark.
-        
-        This is an internal helper method used by `calculate_relative_prices`.
-
-        Args:
-            df (pd.DataFrame): The primary DataFrame with OHLC data.
-            _o (str): Name of the 'open' column in df.
-            _h (str): Name of the 'high' column in df.
-            _l (str): Name of the 'low' column in df.
-            _c (str): Name of the 'close' column in df.
-            bm_df (pd.DataFrame): The benchmark DataFrame.
-            bm_col (str): The column name to use from the benchmark DataFrame for calculation.
-            dgt (int): The number of decimal places for rounding.
-            rebase (bool): If True, rebases the benchmark to 1.0 at the start.
-
-        Returns:
-            pd.DataFrame: A new DataFrame with the 'r' prefixed relative columns.
-        '''
-        try:
-            logging.debug("Starting relative price calculation...")
-            
-            # Create a copy to avoid modifying the original benchmark DataFrame
-            bm_df = bm_df.copy()
-            
-            # Rename the benchmark column for consistent merging
-            bm_df.rename(columns={bm_col: 'bm'}, inplace=True)
-            
-            # Ensure 'date' is a column for merging if it's the index
-            if 'date' not in bm_df.columns:
-                bm_df = bm_df.reset_index()
-                bm_df.rename(columns={bm_df.columns[0]: 'date'}, inplace=True)
-
-            logging.info(f"Merging primary data (shape: {df.shape}) with benchmark data (shape: {bm_df.shape}).")
-            # Merge the primary and benchmark dataframes
-            merged_df = pd.merge(df, bm_df[['date', 'bm']], how='left', on='date')
-            logging.info(f"Merge completed. New DataFrame shape: {merged_df.shape}")
-            
-            # Calculate the benchmark adjustment factor (fwd fill missing values)
-            merged_df['bmfx'] = round(merged_df['bm'], dgt).ffill()
-            
-            # Apply rebase if requested
-            if rebase:
-                if not merged_df['bmfx'].empty and merged_df['bmfx'].iloc[0] != 0:
-                    logging.info(f"Rebasing benchmark to 1.0 using the first value: {merged_df['bmfx'].iloc[0]}")
-                    merged_df['bmfx'] = merged_df['bmfx'].div(merged_df['bmfx'].iloc[0])
-                else:
-                    logging.warning("Benchmark data is empty or first value is zero, cannot rebase.")
-            
-            # Calculate relative prices for OHLC columns
-            logging.info("Calculating relative OHLC prices...")
-            merged_df['r' + str(_o)] = round(merged_df[_o].div(merged_df['bmfx']), dgt)
-            merged_df['r' + str(_h)] = round(merged_df[_h].div(merged_df['bmfx']), dgt)
-            merged_df['r' + str(_l)] = round(merged_df[_l].div(merged_df['bmfx']), dgt)
-            merged_df['r' + str(_c)] = round(merged_df[_c].div(merged_df['bmfx']), dgt)
-            logging.info("Relative price calculation complete.")
-            
-            # Drop the temporary benchmark columns
-            merged_df = merged_df.drop(['bm', 'bmfx'], axis=1)
-            
-            return merged_df
-        except Exception as e:
-            logging.error(f"An error occurred during relative price calculation: {e}")
-            raise
     
-    def calculate_relative_prices(self, 
-                                stock_data: pd.DataFrame, 
-                                benchmark_data: pd.DataFrame,
-                                benchmark_column: str = 'close',
-                                digits: int = 4,
-                                rebase: bool = True) -> pd.DataFrame:
+    def __init__(
+        self, 
+        column_config: Optional[OHLCColumns] = None
+    ):
         """
-        Calculate relative prices using the internal `_calculate_relative()` function.
+        Initialize OHLCProcessor.
         
         Args:
-            stock_data (pd.DataFrame): Primary DataFrame for analysis.
-            benchmark_data (pd.DataFrame): Benchmark DataFrame for comparison.
-            benchmark_column (str): Column to use from benchmark data.
-            digits (int): Decimal places for rounding.
-            rebase (bool): Whether to rebase benchmark to 1.0.
+            column_config: Custom column naming configuration.
+        """
+        self.columns = column_config or OHLCColumns()
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+    
+    def calculate_relative_prices(
+        self, 
+        stock_data: pd.DataFrame, 
+        benchmark_data: pd.DataFrame,
+        benchmark_column: str = 'close',
+        digits: int = 4,
+        rebase: bool = True
+    ) -> pd.DataFrame:
+        """
+        Calculate asset prices relative to a benchmark.
+        
+        Divides each OHLC value by the corresponding benchmark value,
+        optionally rebasing the benchmark to 1.0 at the start.
+        
+        Args:
+            stock_data: DataFrame with OHLC columns (open, high, low, close) and date.
+            benchmark_data: Benchmark DataFrame with date and price column.
+            benchmark_column: Column name to use from benchmark (default: 'close').
+            digits: Decimal places for rounding (0-10, default: 4).
+            rebase: If True, rebase benchmark to 1.0 at first data point (default: True).
             
         Returns:
-            pd.DataFrame: DataFrame with relative prices.
+            DataFrame with original columns plus relative columns: ropen, rhigh, rlow, rclose.
             
         Raises:
-            ValueError: If calculation fails.
+            TypeError: If inputs are not DataFrames.
+            ValueError: If required columns missing, DataFrames empty, or parameters invalid.
         """
         
+        # Fail fast: Type validation
+        if not isinstance(stock_data, pd.DataFrame):
+            raise TypeError(
+                f"stock_data must be pandas.DataFrame, got {type(stock_data).__name__}"
+            )
+        if not isinstance(benchmark_data, pd.DataFrame):
+            raise TypeError(
+                f"benchmark_data must be pandas.DataFrame, got {type(benchmark_data).__name__}"
+            )
+        
+        # Fail fast: Empty DataFrame check
+        if stock_data.empty:
+            raise ValueError("stock_data cannot be empty")
+        if benchmark_data.empty:
+            raise ValueError("benchmark_data cannot be empty")
+        
+        # Fail fast: Parameter range validation
+        if not isinstance(digits, int) or not 0 <= digits <= 10:
+            raise ValueError(f"digits must be integer between 0-10, got {digits}")
+        
         try:
-            # Ensure proper column naming, especially for date
-            if 'date' not in stock_data.columns:
-                 stock_data = stock_data.reset_index()
-                 stock_data.rename(columns={'Date': 'date'}, inplace=True)
+            # Normalize data structures (validates columns internally)
+            normalized_stock = self._normalize_dataframe(
+                stock_data, 
+                require_ohlc=True
+            )
+            normalized_benchmark = self._normalize_dataframe(
+                benchmark_data,
+                require_ohlc=False
+            )
+            
+            # Validate benchmark column exists after normalization
+            if benchmark_column not in normalized_benchmark.columns:
+                available = ', '.join(normalized_benchmark.columns)
+                raise ValueError(
+                    f"Benchmark column '{benchmark_column}' not found. "
+                    f"Available columns: {available}"
+                )
+            
+            # DEBUG only - developers can enable to trace execution
+            self.logger.debug(
+                "Calculating relative prices: stock_rows=%d, benchmark_rows=%d, benchmark_col='%s', rebase=%s",
+                len(normalized_stock),
+                len(normalized_benchmark),
+                benchmark_column,
+                rebase
+            )
             
             result = self._calculate_relative(
-                df=stock_data,
-                _o='open', _h='high', _l='low', _c='close',
-                bm_df=benchmark_data,
+                df=normalized_stock,
+                _o=self.columns.open,
+                _h=self.columns.high,
+                _l=self.columns.low,
+                _c=self.columns.close,
+                bm_df=normalized_benchmark,
                 bm_col=benchmark_column,
                 dgt=digits,
                 rebase=rebase
             )
             
+            # No INFO log for success - silence is golden
             return result
         
         except Exception as e:
-            logging.error(f"Failed to calculate relative prices: {e}")
-            raise ValueError(f"Calculation failed.")
+            # ERROR: Only log when something actually goes wrong
+            self.logger.error(
+                "Relative price calculation failed: %s (stock_shape=%s, benchmark_shape=%s, benchmark_col='%s')",
+                str(e),
+                stock_data.shape,
+                benchmark_data.shape,
+                benchmark_column,
+                exc_info=True  # Include stack trace
+            )
+            
+            # Re-raise with context
+            raise ValueError(
+                f"Relative price calculation failed: {str(e)} "
+                f"(stock_shape: {stock_data.shape}, "
+                f"benchmark_column: '{benchmark_column}')"
+            ) from e
+    
+    def _normalize_dataframe(
+        self, 
+        df: pd.DataFrame, 
+        require_ohlc: bool = False
+    ) -> pd.DataFrame:
+        """
+        Normalize DataFrame structure for consistent processing.
+        
+        Ensures 'date' column exists and OHLC columns are lowercase.
+        Returns a copy without modifying the input.
+        
+        Args:
+            df: Input DataFrame to normalize.
+            require_ohlc: If True, validates presence of OHLC columns.
+            
+        Returns:
+            New DataFrame with normalized structure.
+            
+        Raises:
+            ValueError: If required columns are missing or structure is invalid.
+        """
+        # Work on copy to avoid mutating input
+        normalized = df.copy()
+        
+        # Ensure date column exists
+        if 'date' not in normalized.columns:
+            if normalized.index.name in ('Date', 'date', None):
+                normalized = normalized.reset_index()
+                first_col = normalized.columns[0]
+                if first_col in ('index', 'Date', 'level_0'):
+                    normalized.rename(columns={first_col: 'date'}, inplace=True)
+            else:
+                raise ValueError(
+                    f"Cannot find date column. "
+                    f"Index name '{normalized.index.name}' not recognized. "
+                    f"Expected 'Date', 'date', or unnamed index."
+                )
+        
+        # Normalize column names to lowercase
+        col_mapping = {}
+        for col in normalized.columns:
+            lower_col = col.lower()
+            if lower_col in ('open', 'high', 'low', 'close', 'date'):
+                col_mapping[col] = lower_col
+        
+        if col_mapping:
+            normalized.rename(columns=col_mapping, inplace=True)
+        
+        # Validate OHLC columns if required
+        if require_ohlc:
+            required_cols = {
+                self.columns.open, 
+                self.columns.high, 
+                self.columns.low, 
+                self.columns.close
+            }
+            actual_cols = set(normalized.columns)
+            missing = required_cols - actual_cols
+            
+            if missing:
+                available = ', '.join(sorted(actual_cols))
+                raise ValueError(
+                    f"Missing required OHLC columns: {missing}. "
+                    f"Available columns: {available}"
+                )
+        
+        return normalized
+    
+    def _calculate_relative(
+        self, 
+        df: pd.DataFrame, 
+        _o: str, 
+        _h: str, 
+        _l: str, 
+        _c: str, 
+        bm_df: pd.DataFrame, 
+        bm_col: str, 
+        dgt: int, 
+        rebase: bool = True
+    ) -> pd.DataFrame:
+        """
+        Internal helper to calculate relative OHLC prices against benchmark.
+        
+        Args:
+            df: Normalized primary DataFrame with OHLC data.
+            _o: Name of 'open' column in df.
+            _h: Name of 'high' column in df.
+            _l: Name of 'low' column in df.
+            _c: Name of 'close' column in df.
+            bm_df: Normalized benchmark DataFrame.
+            bm_col: Column name to use from benchmark.
+            dgt: Decimal places for rounding.
+            rebase: If True, rebase benchmark to 1.0 at start.
+
+        Returns:
+            DataFrame with original columns plus relative price columns (r-prefixed).
+            
+        Raises:
+            ValueError: If benchmark rebasing fails or division by zero occurs.
+        """
+        # Work on copies to preserve inputs
+        working_df = df.copy()
+        benchmark = bm_df.copy()
+        
+        # Rename benchmark column for merging
+        benchmark = benchmark.rename(columns={bm_col: 'bm'})
+        
+        # Merge on date
+        merged_df = pd.merge(
+            working_df, 
+            benchmark[['date', 'bm']], 
+            how='left', 
+            on='date'
+        )
+        
+        # Check for missing benchmark values
+        missing_bm_count = merged_df['bm'].isna().sum()
+        if missing_bm_count > 0:
+            missing_pct = (missing_bm_count / len(merged_df)) * 100
+            
+            # WARNING: Data quality issue that could affect results
+            self.logger.warning(
+                "Missing benchmark data for %d rows (%.1f%%). Values will be forward-filled. "
+                "This may indicate misaligned date ranges.",
+                missing_bm_count,
+                missing_pct
+            )
+        
+        # Create benchmark adjustment factor (forward-fill missing)
+        merged_df['bmfx'] = merged_df['bm'].round(dgt).ffill()
+        
+        # Fail fast: Check for NaN after forward-fill
+        if merged_df['bmfx'].isna().any():
+            first_valid_idx = merged_df['bmfx'].first_valid_index()
+            raise ValueError(
+                f"Benchmark data contains NaN values that cannot be forward-filled. "
+                f"First valid benchmark value at index: {first_valid_idx}"
+            )
+        
+        # Apply rebase if requested
+        if rebase:
+            first_bm_value = merged_df['bmfx'].iloc[0]
+            
+            # Fail fast: Division by zero check
+            if first_bm_value == 0:
+                raise ValueError(
+                    "Cannot rebase: first benchmark value is zero. "
+                    "Rebasing requires non-zero initial value."
+                )
+            
+            merged_df['bmfx'] = merged_df['bmfx'] / first_bm_value
+        
+        # Calculate relative prices for OHLC columns
+        merged_df[f'r{_o}'] = (merged_df[_o] / merged_df['bmfx']).round(dgt)
+        merged_df[f'r{_h}'] = (merged_df[_h] / merged_df['bmfx']).round(dgt)
+        merged_df[f'r{_l}'] = (merged_df[_l] / merged_df['bmfx']).round(dgt)
+        merged_df[f'r{_c}'] = (merged_df[_c] / merged_df['bmfx']).round(dgt)
+        
+        # Check for inf/nan in results (indicates division issues)
+        relative_cols = [f'r{_o}', f'r{_h}', f'r{_l}', f'r{_c}']
+        for col in relative_cols:
+            invalid_mask = merged_df[col].isnull() | (merged_df[col] == float('inf'))
+            invalid_count = invalid_mask.sum()
+            
+            if invalid_count > 0:
+                # WARNING: Unexpected calculation results
+                self.logger.warning(
+                    "Column '%s' contains %d invalid values (NaN/inf). "
+                    "This indicates zero or near-zero benchmark values.",
+                    col,
+                    invalid_count
+                )
+        
+        # Drop temporary benchmark columns
+        merged_df = merged_df.drop(columns=['bm', 'bmfx'])
+        
+        return merged_df
