@@ -229,7 +229,8 @@ class SignalGridSearch:
                 combinations.append({
                     'entry': entry_sig,
                     'exit': exit_sig,
-                    'name': f'entry_{entry_sig}__exit_{exit_sig}'
+                    'name': f'{entry_sig}__{exit_sig}'
+                    # 'name': f'entry_{entry_sig}__exit_{exit_sig}'
                 })
         
         print(f"\nTotal combinations to test: {len(combinations)}")
