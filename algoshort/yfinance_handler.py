@@ -209,6 +209,9 @@ class YFinanceDataHandler:
             # Rename index column to 'date' if needed
             if data.columns[0].lower() in ['date', 'datetime'] or 'date' not in data.columns:
                 data = data.rename(columns={data.columns[0]: 'date'})
+
+            data.set_index('date')
+            data.columns.name = None
             
             return data
             
