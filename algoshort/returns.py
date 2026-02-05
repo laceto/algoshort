@@ -61,13 +61,6 @@ class ReturnsCalculator:
             inplace (bool): If True, modify input DataFrame; else return a new one. Defaults to False.
 
         Returns:
-<<<<<<< HEAD
-            pd.DataFrame: DataFrame with additional columns.
-
-        Raises:
-            KeyError: If required columns are missing.
-            ValueError: If DataFrame is empty or data types are non-numeric.
-=======
             pd.DataFrame: DataFrame with additional columns:
                 - '<signal>_chg1D': Daily price change based on lagged signal.
                 - '<signal>_chg1D_fx': Duplicate of daily price change (for compatibility).
@@ -80,7 +73,6 @@ class ReturnsCalculator:
         Raises:
             KeyError: If required columns ('close'/'r_close', 'high'/'r_high', 'low'/'r_low', signal) are missing.
             ValueError: If DataFrame is empty, or data types are non-numeric.
->>>>>>> 2a1e67377153da372d2b39f45c33c88b3cd54e31
         """
         try:
             # Validate inputs
