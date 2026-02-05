@@ -1,5 +1,12 @@
 import pandas as pd
 import numpy as np
+from typing import List, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import partial
+from joblib import Parallel, delayed
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class PositionSizing:
@@ -94,30 +101,65 @@ class PositionSizing:
     
     def _get_column_names(self, prefix):
         """
-        Generate prefixed column names for strategies and outputs.
-        
-        Parameters:
-        -----------
-        prefix : str
-            Prefix to add to column names (typically the signal name)
-            
-        Returns:
-        --------
-        dict
-            Dictionary containing all column name mappings
+        Generate clear, consistent column names.
+        Example output for prefix='rbo_50__rbo_50':
+            equity:  rbo_50__rbo_50_equity_equal
+                    rbo_50__rbo_50_equity_constant
+                    rbo_50__rbo_50_equity_concave
+                    rbo_50__rbo_50_equity_convex
+            shares:  rbo_50__rbo_50_shares_equal
+                    ...
         """
+        base = prefix
         return {
-            'strategies': [f'{prefix}_equal_weight', f'{prefix}_constant', 
-                          f'{prefix}_concave', f'{prefix}_convex'],
-            'share_cols': [f'{prefix}_shs_eql', f'{prefix}_shs_fxd', 
-                          f'{prefix}_shs_ccv', f'{prefix}_shs_cvx'],
-            'risk_configs': [
-                {'col': f'{prefix}_concave', 'shape': -1, 'store': f'{prefix}_ccv'},
-                {'col': f'{prefix}_convex', 'shape': 1, 'store': f'{prefix}_cvx'}
+            'strategies': [
+                f'{base}_equity_equal',
+                f'{base}_equity_constant',
+                f'{base}_equity_concave',
+                f'{base}_equity_convex',
             ],
-            'ccv': f'{prefix}_ccv',
-            'cvx': f'{prefix}_cvx'
+            'share_cols': [
+                f'{base}_shares_equal',
+                f'{base}_shares_constant',
+                f'{base}_shares_concave',
+                f'{base}_shares_convex',
+            ],
+            'risk_configs': [
+                {'col': f'{base}_equity_concave', 'shape': -1, 'store': f'{base}_risk_concave'},
+                {'col': f'{base}_equity_convex',  'shape':  1, 'store': f'{base}_risk_convex'},
+            ],
+            'ccv': f'{base}_risk_concave',
+            'cvx': f'{base}_risk_convex'
         }
+    
+    # def _get_column_names(self, prefix):
+    #     """
+    #     Generate prefixed column names for strategies and outputs.
+        
+    #     Parameters:
+    #     -----------
+    #     prefix : str
+    #         Prefix to add to column names (typically the signal name)
+            
+    #     Returns:
+    #     --------
+    #     dict
+    #         Dictionary containing all column name mappings
+    #     """
+    #     return {
+    #         'strategies': [f'{prefix}_equal_weight', f'{prefix}_constant', 
+    #                       f'{prefix}_concave', f'{prefix}_convex'],
+    #         # 'strategies': [f'{prefix}_equity_equal_weight', f'{prefix}_equity_constant', 
+    #         #               f'{prefix}_equity_concave', f'{prefix}_equity_convex'],
+    #         'share_cols': [f'{prefix}_shs_eql', f'{prefix}_shs_fxd', 
+    #                       f'{prefix}_shs_ccv', f'{prefix}_shs_cvx'],
+    #         'risk_configs': [
+    #             {'col': f'{prefix}_concave', 'shape': -1, 'store': f'{prefix}_ccv'},
+    #             {'col': f'{prefix}_convex', 'shape': 1, 'store': f'{prefix}_cvx'}
+    #         ],
+    #         'ccv': f'{prefix}_ccv',
+    #         'cvx': f'{prefix}_cvx'
+    #     }
     
     def _initialize_columns(self, df, cols):
         """
@@ -240,8 +282,14 @@ class PositionSizing:
                    (px * self.lot)) * self.lot
         
         # Calculate risk-based shares
+        # share_configs = [
+        #     {'strategy': cols['strategies'][1], 'risk': self.avg, 'key': cols['share_cols'][1]},
+        #     {'strategy': cols['strategies'][2], 'risk': risk_values[cols['ccv']], 'key': cols['share_cols'][2]},
+        #     {'strategy': cols['strategies'][3], 'risk': risk_values[cols['cvx']], 'key': cols['share_cols'][3]}
+        # ]
+
         share_configs = [
-            {'strategy': cols['strategies'][1], 'risk': self.avg, 'key': cols['share_cols'][1]},
+            {'strategy': cols['strategies'][1], 'risk': self.avg,     'key': cols['share_cols'][1]},
             {'strategy': cols['strategies'][2], 'risk': risk_values[cols['ccv']], 'key': cols['share_cols'][2]},
             {'strategy': cols['strategies'][3], 'risk': risk_values[cols['cvx']], 'key': cols['share_cols'][3]}
         ]
@@ -254,7 +302,7 @@ class PositionSizing:
                 eqty=df.at[i, config['strategy']],
                 risk=config['risk'],
                 fx=fx,
-                lot=100
+                lot=self.lot
             )
         
         return shares
@@ -341,3 +389,129 @@ class PositionSizing:
             self._store_shares(df, i, shares_dict, cols)
         
         return df
+    
+    def calculate_shares_for_signal(
+            self,
+            df: pd.DataFrame,
+            signal: str,
+            daily_chg: str = "chg1D_fx",
+            sl: str = "stop_loss",
+            close: str = "close",
+            **kwargs
+        ) -> pd.DataFrame:
+            """
+            Thin wrapper that works on a **copy** and returns it.
+            Prevents in-place modification issues in parallel runs.
+            """
+            df_copy = df.copy()
+            return self.calculate_shares(
+                df=df_copy,
+                signal=signal,
+                daily_chg=daily_chg,
+                sl=sl,
+                close=close,
+                **kwargs
+            )
+
+def get_signal_column_names(
+    signal: str,
+    chg_suffix: str = "_chg1D_fx",
+    sl_suffix: str = "_stop_loss",
+    close_col: str = "close"
+) -> dict:
+    """
+    Central place to define how column names are constructed for each signal.
+
+    Returns dictionary with resolved column names.
+    """
+    if not signal or not isinstance(signal, str):
+        raise ValueError("Signal must be a non-empty string")
+
+    return {
+        "signal": signal,
+        "daily_chg": f"{signal}{chg_suffix}",
+        "sl": f"{signal}{sl_suffix}",
+        "close": close_col,
+    }
+
+def run_position_sizing_parallel(
+    sizer: PositionSizing,
+    df: pd.DataFrame,
+    signals: List[str],
+    chg_suffix: str = "_chg1D_fx",
+    sl_suffix: str = "_stop_loss",
+    close_col: str = "close",
+    n_jobs: int = -1,
+    verbose: int = 10,
+) -> pd.DataFrame:
+    """
+    Run position sizing for multiple signals in parallel using consistent naming.
+
+    Args:
+        signals: List of signal column names (e.g. ['rsi2', 'ma_cross'])
+        chg_suffix / sl_suffix: Allow customization of naming convention
+        n_jobs: -1 = use all cores
+
+    Returns:
+        DataFrame with all new equity/shares/risk columns added
+    """
+    if not signals:
+        raise ValueError("No signals provided")
+
+    # Validate all signals exist
+    missing_signals = [s for s in signals if s not in df.columns]
+    if missing_signals:
+        raise ValueError(f"Missing signal columns in DataFrame: {missing_signals}")
+
+    # Prepare tasks with resolved column names
+    tasks = []
+    for signal in signals:
+        cols = get_signal_column_names(
+            signal=signal,
+            chg_suffix=chg_suffix,
+            sl_suffix=sl_suffix,
+            close_col=close_col
+        )
+
+        # Early column existence check (fail fast)
+        required_cols = [cols["signal"], cols["daily_chg"], cols["sl"], cols["close"]]
+        missing = [c for c in required_cols if c not in df.columns]
+
+        if missing:
+            logger.error(
+                f"Skipping signal '{signal}': missing columns {missing}\n"
+                f"Expected: {required_cols}"
+            )
+            continue
+
+        tasks.append(cols)
+
+    if not tasks:
+        raise RuntimeError("No valid signal configurations found — check column names")
+
+    logger.info(f"Processing {len(tasks)} signals in parallel (n_jobs={n_jobs})")
+
+    # Run in parallel
+    results = Parallel(n_jobs=n_jobs, verbose=verbose)(
+        delayed(sizer.calculate_shares_for_signal)(
+            df=df,
+            signal=task["signal"],
+            daily_chg=task["daily_chg"],
+            sl=task["sl"],
+            close=task["close"],
+        )
+        for task in tasks
+    )
+
+# Merge results safely
+    result_df = df.copy()
+
+    for processed_df in results:
+        # Only add new columns (avoid overwriting original data)
+        new_columns = [c for c in processed_df.columns if c not in result_df.columns]
+        if new_columns:
+            result_df[new_columns] = processed_df[new_columns]
+
+    logger.info(f"Completed — added columns for {len(results)} signals")
+
+    return result_df
