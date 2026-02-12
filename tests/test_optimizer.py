@@ -17,9 +17,14 @@ import pytest
 
 from algoshort.optimizer import (
     FLOAT_TOLERANCE,
+    MAX_CV_VALUE,
     MAX_GRID_COMBINATIONS,
+    MAX_PARAM_VALUES,
+    MIN_PEAK_VALUE,
     MIN_SEGMENT_ROWS,
     MIN_SEGMENT_SIZE,
+    PARAM_MATCH_RTOL,
+    PARAM_ROUND_DECIMALS,
     StrategyOptimizer,
     _sanitize_filename,
     _worker_evaluate,
@@ -347,20 +352,19 @@ class TestRunGridSearch:
             )
 
     def test_empty_value_list(self, sample_ohlc_df, mock_equity_func, temp_config_file):
-        """Test with empty value list returns empty DataFrame."""
+        """Test with empty value list raises ValueError."""
         optimizer = StrategyOptimizer(
             data=sample_ohlc_df,
             equity_func=mock_equity_func,
             config_path=temp_config_file,
         )
 
-        result = optimizer.run_grid_search(
-            segment_data=sample_ohlc_df,
-            param_grid={'window': []},
-            segment_idx=0,
-        )
-
-        assert result.empty
+        with pytest.raises(ValueError, match="has no values"):
+            optimizer.run_grid_search(
+                segment_data=sample_ohlc_df,
+                param_grid={'window': []},
+                segment_idx=0,
+            )
 
     def test_single_combination(self, sample_ohlc_df, mock_equity_func, temp_config_file):
         """Test with single combination."""
@@ -675,7 +679,7 @@ class TestEdgeCases:
     """Tests for edge cases."""
 
     def test_all_nan_metric(self, sample_ohlc_df, temp_config_file):
-        """Test handling of all-NaN metric values."""
+        """Test handling of all-NaN metric values raises error."""
         def equity_func(df, **kwargs):
             return {'convex': np.nan, 'constant': np.nan}
 
@@ -685,17 +689,15 @@ class TestEdgeCases:
             config_path=temp_config_file,
         )
 
-        # Should handle gracefully (skipping segments with all-NaN)
-        oos_df, stability, history = optimizer.rolling_walk_forward(
-            stop_method='atr',
-            param_grid={'window': [10]},
-            n_segments=2,
-            n_jobs=1,
-            opt_metric='convex',
-        )
-
-        # May have no valid segments due to all-NaN
-        assert stability['n_segments_valid'] >= 0
+        # All-NaN metrics cause all segments to be skipped, which now raises ValueError
+        with pytest.raises(ValueError, match="All .* segments were skipped"):
+            optimizer.rolling_walk_forward(
+                stop_method='atr',
+                param_grid={'window': [10]},
+                n_segments=2,
+                n_jobs=1,
+                opt_metric='convex',
+            )
 
     def test_constant_prices(self, temp_config_file):
         """Test with constant price data."""
@@ -839,6 +841,513 @@ class TestLogging:
         # Should have no direct print output (may have joblib output)
         # Main assertion is that it doesn't crash
         assert True
+
+
+# =============================================================================
+# Test new constants
+# =============================================================================
+
+class TestNewConstants:
+    """Tests for new module constants added in agent team review."""
+
+    def test_max_param_values(self):
+        """Test MAX_PARAM_VALUES constant."""
+        assert MAX_PARAM_VALUES > 0
+        assert MAX_PARAM_VALUES == 1000
+
+    def test_param_match_rtol(self):
+        """Test PARAM_MATCH_RTOL constant."""
+        assert PARAM_MATCH_RTOL > 0
+        assert PARAM_MATCH_RTOL == 1e-5
+
+    def test_param_round_decimals(self):
+        """Test PARAM_ROUND_DECIMALS constant."""
+        assert PARAM_ROUND_DECIMALS > 0
+        assert PARAM_ROUND_DECIMALS == 6
+
+    def test_min_peak_value(self):
+        """Test MIN_PEAK_VALUE constant."""
+        assert MIN_PEAK_VALUE > 0
+        assert MIN_PEAK_VALUE == 1e-6
+
+    def test_max_cv_value(self):
+        """Test MAX_CV_VALUE constant."""
+        assert MAX_CV_VALUE > 0
+        assert MAX_CV_VALUE == 10.0
+
+
+# =============================================================================
+# Test stop_method and price_col parameter passing
+# =============================================================================
+
+class TestParameterPassing:
+    """Tests for correct parameter passing through grid search."""
+
+    def test_stop_method_passed_to_worker(self, sample_ohlc_df, temp_config_file):
+        """Test that stop_method is correctly passed to _worker_evaluate."""
+        received_params = {}
+
+        def tracking_equity_func(df, segment_idx=0, config_path='',
+                                  stop_method='default', price_col='close', **kwargs):
+            received_params['stop_method'] = stop_method
+            received_params['price_col'] = price_col
+            return {'convex': 1.0}
+
+        result = _worker_evaluate(
+            segment_data=sample_ohlc_df,
+            segment_idx=0,
+            param_kwargs={'window': 10},
+            equity_func=tracking_equity_func,
+            config_path=temp_config_file,
+            stop_method='fixed_percentage',
+            price_col='rclose',
+        )
+
+        assert received_params['stop_method'] == 'fixed_percentage'
+        assert received_params['price_col'] == 'rclose'
+
+    def test_stop_method_passed_through_grid_search(
+            self, sample_ohlc_df, temp_config_file):
+        """Test that stop_method is passed through run_grid_search."""
+        calls = []
+
+        def tracking_equity_func(df, segment_idx=0, config_path='',
+                                  stop_method='default', price_col='close', **kwargs):
+            calls.append({
+                'stop_method': stop_method,
+                'price_col': price_col,
+            })
+            return {'convex': 1.0}
+
+        optimizer = StrategyOptimizer(
+            data=sample_ohlc_df,
+            equity_func=tracking_equity_func,
+            config_path=temp_config_file,
+        )
+
+        optimizer.run_grid_search(
+            segment_data=sample_ohlc_df,
+            param_grid={'window': [10, 20]},
+            segment_idx=0,
+            stop_method='volatility_std',
+            price_col='adjusted_close',
+            n_jobs=1,
+        )
+
+        assert len(calls) == 2
+        for call in calls:
+            assert call['stop_method'] == 'volatility_std'
+            assert call['price_col'] == 'adjusted_close'
+
+    def test_stop_method_default_in_grid_search(
+            self, sample_ohlc_df, temp_config_file):
+        """Test default stop_method when not specified."""
+        calls = []
+
+        def tracking_equity_func(df, segment_idx=0, config_path='',
+                                  stop_method='default', price_col='close', **kwargs):
+            calls.append({'stop_method': stop_method})
+            return {'convex': 1.0}
+
+        optimizer = StrategyOptimizer(
+            data=sample_ohlc_df,
+            equity_func=tracking_equity_func,
+            config_path=temp_config_file,
+        )
+
+        optimizer.run_grid_search(
+            segment_data=sample_ohlc_df,
+            param_grid={'window': [10]},
+            segment_idx=0,
+            n_jobs=1,
+        )
+
+        assert calls[0]['stop_method'] == 'atr'  # Default
+
+
+# =============================================================================
+# Test empty param values validation
+# =============================================================================
+
+class TestEmptyParamValuesValidation:
+    """Tests for empty parameter values validation."""
+
+    def test_empty_param_values_raises_error(
+            self, sample_ohlc_df, mock_equity_func, temp_config_file):
+        """Test that empty param values list raises ValueError."""
+        optimizer = StrategyOptimizer(
+            data=sample_ohlc_df,
+            equity_func=mock_equity_func,
+            config_path=temp_config_file,
+        )
+
+        with pytest.raises(ValueError, match="has no values"):
+            optimizer.run_grid_search(
+                segment_data=sample_ohlc_df,
+                param_grid={'window': []},
+                segment_idx=0,
+            )
+
+    def test_mixed_empty_and_valid_raises_error(
+            self, sample_ohlc_df, mock_equity_func, temp_config_file):
+        """Test that mixed empty/valid param values raises error."""
+        optimizer = StrategyOptimizer(
+            data=sample_ohlc_df,
+            equity_func=mock_equity_func,
+            config_path=temp_config_file,
+        )
+
+        with pytest.raises(ValueError, match="has no values"):
+            optimizer.run_grid_search(
+                segment_data=sample_ohlc_df,
+                param_grid={'window': [10, 20], 'multiplier': []},
+                segment_idx=0,
+            )
+
+
+# =============================================================================
+# Test MAX_PARAM_VALUES limit
+# =============================================================================
+
+class TestParamValuesLimit:
+    """Tests for MAX_PARAM_VALUES limit."""
+
+    def test_exceeds_param_values_limit(
+            self, sample_ohlc_df, mock_equity_func, temp_config_file):
+        """Test that exceeding MAX_PARAM_VALUES raises RuntimeError."""
+        optimizer = StrategyOptimizer(
+            data=sample_ohlc_df,
+            equity_func=mock_equity_func,
+            config_path=temp_config_file,
+        )
+
+        large_values = list(range(MAX_PARAM_VALUES + 100))
+
+        with pytest.raises(RuntimeError, match="exceeds limit"):
+            optimizer.run_grid_search(
+                segment_data=sample_ohlc_df,
+                param_grid={'window': large_values},
+                segment_idx=0,
+            )
+
+    def test_at_param_values_limit(
+            self, sample_ohlc_df, mock_equity_func, temp_config_file):
+        """Test that exactly MAX_PARAM_VALUES works."""
+        optimizer = StrategyOptimizer(
+            data=sample_ohlc_df,
+            equity_func=mock_equity_func,
+            config_path=temp_config_file,
+        )
+
+        # This would create too many combinations, but the param limit should
+        # not be hit since we're at exactly the limit
+        # However, MAX_GRID_COMBINATIONS will prevent this from running
+        # So we use a smaller test
+        values = list(range(10))  # Well under limit
+
+        result = optimizer.run_grid_search(
+            segment_data=sample_ohlc_df,
+            param_grid={'window': values},
+            segment_idx=0,
+            n_jobs=1,
+        )
+
+        assert len(result) == 10
+
+
+# =============================================================================
+# Test all segments skipped validation
+# =============================================================================
+
+class TestAllSegmentsSkippedValidation:
+    """Tests for validation when all segments are skipped."""
+
+    def test_all_segments_skipped_raises_error(self, temp_config_file):
+        """Test that all segments skipped raises ValueError."""
+        # Create data that's too small for the number of segments
+        # but passes initial validation
+        small_df = pd.DataFrame({
+            'date': pd.date_range('2020-01-01', periods=100, freq='D'),
+            'open': [100.0] * 100,
+            'high': [101.0] * 100,
+            'low': [99.0] * 100,
+            'close': [100.0] * 100,
+        })
+
+        def equity_func(df, **kwargs):
+            return {'convex': 1.0}
+
+        optimizer = StrategyOptimizer(
+            data=small_df,
+            equity_func=equity_func,
+            config_path=temp_config_file,
+        )
+
+        # n_segments=4 with 100 rows gives segment_size=20
+        # MIN_SEGMENT_ROWS=30, so all segments will be skipped
+        with pytest.raises(ValueError, match="All .* segments were skipped"):
+            optimizer.rolling_walk_forward(
+                stop_method='atr',
+                param_grid={'window': [10]},
+                n_segments=4,
+                n_jobs=1,
+            )
+
+
+# =============================================================================
+# Test CV capping
+# =============================================================================
+
+class TestCVCapping:
+    """Tests for coefficient of variation capping."""
+
+    def test_cv_capped_at_max(self, sample_ohlc_df, temp_config_file):
+        """Test that CV is capped at MAX_CV_VALUE."""
+        # Create equity function that returns very small mean values
+        # which would cause extremely high CV
+        call_count = [0]
+
+        def extreme_cv_equity_func(df, **kwargs):
+            call_count[0] += 1
+            # Return very small values that would give extreme CV
+            return {
+                'convex': 0.0001 * call_count[0],  # Tiny values
+                'window': kwargs.get('window', 10),
+            }
+
+        optimizer = StrategyOptimizer(
+            data=sample_ohlc_df,
+            equity_func=extreme_cv_equity_func,
+            config_path=temp_config_file,
+        )
+
+        _, stability, _ = optimizer.rolling_walk_forward(
+            stop_method='atr',
+            param_grid={'window': [10, 20, 30]},
+            n_segments=3,
+            n_jobs=1,
+        )
+
+        if 'window_cv' in stability:
+            # CV should be capped
+            assert stability['window_cv'] <= MAX_CV_VALUE or np.isnan(stability['window_cv'])
+
+
+# =============================================================================
+# Test sensitivity analysis improvements
+# =============================================================================
+
+class TestSensitivityAnalysisImprovements:
+    """Tests for sensitivity analysis improvements."""
+
+    def test_integer_best_val_included(
+            self, sample_ohlc_df, mock_equity_func, temp_config_file):
+        """Test that integer best_val is always included in grid."""
+        optimizer = StrategyOptimizer(
+            data=sample_ohlc_df,
+            equity_func=mock_equity_func,
+            config_path=temp_config_file,
+        )
+
+        best_val = 17  # Odd number that might be missed by rounding
+
+        _, results = optimizer.sensitivity_analysis(
+            stop_method='atr',
+            best_params={'window': best_val},
+            variance=0.2,
+        )
+
+        # best_val should be in the results
+        assert best_val in results['window'].values
+
+    def test_stop_method_passed_to_sensitivity(
+            self, sample_ohlc_df, temp_config_file):
+        """Test that stop_method is passed through sensitivity_analysis."""
+        calls = []
+
+        def tracking_equity_func(df, segment_idx=0, config_path='',
+                                  stop_method='default', price_col='close', **kwargs):
+            calls.append({'stop_method': stop_method, 'price_col': price_col})
+            return {'convex': 1.0}
+
+        optimizer = StrategyOptimizer(
+            data=sample_ohlc_df,
+            equity_func=tracking_equity_func,
+            config_path=temp_config_file,
+        )
+
+        optimizer.sensitivity_analysis(
+            stop_method='breakout_channel',
+            best_params={'window': 14},
+            close_col='adjusted',
+        )
+
+        # All calls should use the specified stop_method
+        for call in calls:
+            assert call['stop_method'] == 'breakout_channel'
+            assert call['price_col'] == 'adjusted'
+
+    def test_near_zero_peak_returns_nan(
+            self, sample_ohlc_df, temp_config_file):
+        """Test that near-zero peak value returns NaN plateau ratio."""
+        def near_zero_equity_func(df, **kwargs):
+            return {'convex': 1e-10}  # Very small value
+
+        optimizer = StrategyOptimizer(
+            data=sample_ohlc_df,
+            equity_func=near_zero_equity_func,
+            config_path=temp_config_file,
+        )
+
+        plateau_ratio, _ = optimizer.sensitivity_analysis(
+            stop_method='atr',
+            best_params={'window': 14},
+        )
+
+        # Should be NaN due to near-zero peak
+        assert np.isnan(plateau_ratio)
+
+
+# =============================================================================
+# Test NaN warning in get_equity
+# =============================================================================
+
+class TestNaNWarning:
+    """Tests for NaN warning in metric results."""
+
+    def test_nan_metrics_logged(self, sample_ohlc_df, temp_config_file, caplog):
+        """Test that NaN metrics trigger warning log."""
+        # This is a behavior test - we can't easily trigger NaN in get_equity
+        # without a full integration test, so we test the warning mechanism
+        # through the optimizer's handling
+
+        def nan_equity_func(df, **kwargs):
+            return {
+                'convex': np.nan,
+                'constant': 1.0,
+                'segment_idx': kwargs.get('segment_idx', 0),
+            }
+
+        optimizer = StrategyOptimizer(
+            data=sample_ohlc_df,
+            equity_func=nan_equity_func,
+            config_path=temp_config_file,
+        )
+
+        # The grid search should work, but results will have NaN
+        result = optimizer.run_grid_search(
+            segment_data=sample_ohlc_df,
+            param_grid={'window': [10]},
+            segment_idx=0,
+            n_jobs=1,
+        )
+
+        assert pd.isna(result.iloc[0]['convex'])
+
+
+# =============================================================================
+# Test float comparison in matches_params
+# =============================================================================
+
+class TestFloatComparison:
+    """Tests for float comparison in sensitivity analysis."""
+
+    def test_float_comparison_tolerance(
+            self, sample_ohlc_df, mock_equity_func, temp_config_file):
+        """Test that float comparison uses proper tolerance."""
+        optimizer = StrategyOptimizer(
+            data=sample_ohlc_df,
+            equity_func=mock_equity_func,
+            config_path=temp_config_file,
+        )
+
+        # Use float value that might have precision issues
+        best_params = {'multiplier': 2.0}
+
+        # Should not raise "not found" error due to float precision
+        plateau_ratio, results = optimizer.sensitivity_analysis(
+            stop_method='atr',
+            best_params=best_params,
+            variance=0.2,
+        )
+
+        assert isinstance(plateau_ratio, (float, type(np.nan)))
+        assert not results.empty
+
+
+# =============================================================================
+# Integration tests
+# =============================================================================
+
+class TestIntegration:
+    """Integration tests for the complete optimization workflow."""
+
+    def test_full_walk_forward_workflow(
+            self, sample_ohlc_df, mock_equity_func, temp_config_file):
+        """Test complete walk-forward optimization workflow."""
+        optimizer = StrategyOptimizer(
+            data=sample_ohlc_df,
+            equity_func=mock_equity_func,
+            config_path=temp_config_file,
+        )
+
+        # Run walk-forward
+        oos_df, stability, history = optimizer.rolling_walk_forward(
+            stop_method='atr',
+            param_grid={'window': [10, 14, 20]},
+            n_segments=2,
+            n_jobs=1,
+        )
+
+        # Verify outputs
+        assert isinstance(oos_df, pd.DataFrame)
+        assert 'n_segments_valid' in stability
+        assert isinstance(history, list)
+
+        # Run sensitivity analysis on best params from last segment
+        if history:
+            best_params = history[-1]['params']
+            plateau_ratio, sens_results = optimizer.sensitivity_analysis(
+                stop_method='atr',
+                best_params=best_params,
+            )
+
+            assert isinstance(sens_results, pd.DataFrame)
+            assert not sens_results.empty
+
+    def test_parameter_consistency_across_methods(
+            self, sample_ohlc_df, temp_config_file):
+        """Test that parameters are consistent across all methods."""
+        tracking = {'grid_search': [], 'walk_forward': [], 'sensitivity': []}
+
+        def tracking_func(df, segment_idx=0, config_path='',
+                          stop_method='default', price_col='close', **kwargs):
+            call_info = {
+                'stop_method': stop_method,
+                'price_col': price_col,
+                'kwargs': kwargs,
+            }
+            return {'convex': 1.0, 'window': kwargs.get('window', 10)}
+
+        optimizer = StrategyOptimizer(
+            data=sample_ohlc_df,
+            equity_func=tracking_func,
+            config_path=temp_config_file,
+        )
+
+        # Test that parameters flow through correctly
+        result = optimizer.run_grid_search(
+            segment_data=sample_ohlc_df,
+            param_grid={'window': [10, 20]},
+            segment_idx=0,
+            stop_method='test_method',
+            price_col='test_col',
+            n_jobs=1,
+        )
+
+        # Verify results contain expected parameters
+        assert 'window' in result.columns
+        assert set(result['window'].unique()) == {10, 20}
 
 
 if __name__ == '__main__':

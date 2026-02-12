@@ -45,5 +45,4 @@ data/
 *.xlsb
 claude_teams
 settings.json
-CHANGELOG.md
 'result analysis.md'

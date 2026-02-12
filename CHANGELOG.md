@@ -1,0 +1,277 @@
+# Changelog
+
+All notable changes to the `algoshort` package will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Security
+- **PENDING** - Remove exposed credentials from `.env` file
+- **PENDING** - Remove `.env` from git history
+
+### Added
+- **DONE** - `algoshort/regimes/` subpackage - Unified regime detection:
+  - `base.py` - Abstract base class with shared utilities:
+    - Common OHLC column detection (absolute and relative)
+    - DataFrame validation
+    - Caching mechanism
+    - Logging setup
+    - Window validation helpers
+    - `calculate_atr()` utility function
+    - `validate_window_order()` utility function
+  - `ma.py` - Moving Average Crossover detector:
+    - `MovingAverageCrossover` class
+    - SMA and EMA triple crossover support
+    - Caching for computed MAs
+    - `sma_crossover()` and `ema_crossover()` convenience methods
+  - `breakout.py` - Breakout and Turtle Trader detector:
+    - `BreakoutRegime` class
+    - Single-window breakout detection
+    - Dual-window Turtle Trader strategy
+    - Rolling stats caching
+    - `breakout()` and `turtle()` convenience methods
+  - `floor_ceiling.py` - Floor/Ceiling Swing Analysis:
+    - `FloorCeilingRegime` class (refactored from regime_fc.py)
+    - Multi-level swing analysis
+    - Floor and ceiling level detection
+    - Regime change tracking
+  - `__init__.py` - Unified `RegimeDetector` facade:
+    - Single entry point for all regime methods
+    - Lazy-loaded individual detectors
+    - `compute()` generic interface with method aliases
+    - `compute_all()` for batch computation
+    - `get_signal_columns()` helper
+    - `available_methods()` class method
+- **DONE** - `tests/test_regimes.py` - Comprehensive test suite (100+ tests):
+  - Base class functionality tests
+  - MovingAverageCrossover tests (caching, signals, edge cases)
+  - BreakoutRegime tests (breakout, turtle, validation)
+  - FloorCeilingRegime tests (swing analysis, regime detection)
+  - RegimeDetector unified interface tests
+  - Edge cases (NaN, negative prices, zero prices, constant prices)
+  - Integration tests
+- **DONE** - `notebooks/position_sizing_guide.ipynb` - Position sizing user guide
+- **DONE** - `notebooks/regimes_guide.ipynb` - Regime detection user guide
+- **DONE** - LICENSE file (MIT) - Added MIT license
+- **DONE** - CHANGELOG.md for tracking changes
+- **DONE** - `tests/conftest.py` with pytest fixtures for OHLC data
+- **DONE** - `tests/test_position_sizing.py` - Comprehensive tests with edge cases:
+  - Constructor validation tests
+  - Division by zero edge cases
+  - Position sizing calculations (long/short)
+  - Risk appetite calculations
+  - Float equality edge cases
+- **DONE** - `tests/test_yfinance_handler.py` - Comprehensive tests with edge cases:
+  - Initialization and configuration tests
+  - Symbol validation and preprocessing tests
+  - Cache path security (path traversal prevention)
+  - Cache expiration tests
+  - Data retrieval method tests
+  - Save/load functionality tests
+- **DONE** - `tests/test_ohlcprocessor.py` - Comprehensive tests with edge cases:
+  - Input validation tests (type, empty, missing columns)
+  - Relative price calculation tests
+  - Rebase functionality tests
+  - Edge cases (zero benchmark, negative values, missing data)
+  - Column normalization tests
+  - Custom benchmark column tests
+- **DONE** - `results analysis.md` - Comprehensive package review
+- **DONE** - `results_analysis_position_sizing.md` - Position sizing module review
+- **DONE** - `results_analysis_algoshortyfinance_handler.md` - YFinanceDataHandler module review
+- **DONE** - `results_analysis_ohlcprocessor.md` - OHLCProcessor module review
+- **DONE** - `results_analysis_returns.md` - ReturnsCalculator module review
+- **DONE** - `tests/test_returns.py` - Comprehensive tests with edge cases:
+  - Constructor validation tests
+  - OHLC column mapping tests
+  - Returns calculation tests (inplace and copy modes)
+  - Edge cases (empty DataFrame, single row, zero prices, extreme returns)
+  - Log returns clipping for -inf prevention
+  - Multiple signals parallel processing tests
+- **DONE** - `results_analysis_stop_loss.md` - StopLossCalculator module review
+- **DONE** - `tests/test_stop_loss.py` - Comprehensive tests with edge cases:
+  - Constructor and data setter validation tests
+  - Signal column validation tests
+  - Parameter validation (percentage, multiplier, window)
+  - All stop-loss method calculation tests
+  - Edge cases (negative stops, zero prices, extreme parameters)
+  - Cache mechanism tests
+  - Generic interface (get_stop_loss) tests
+- **DONE** - `tests/test_combiner.py` - Comprehensive tests for HybridSignalCombiner (43 tests):
+  - Initialization and configuration tests
+  - Signal validation tests (missing columns, invalid regime values)
+  - Entry logic tests (long/short entries, regime alignment modes)
+  - Exit logic tests (signal-based and flip-based exits)
+  - Position flipping tests (long-to-short, short-to-long transitions)
+  - Trade metadata tests (entry price, stop loss, target price)
+  - Trade summary statistics tests
+  - SignalGridSearch tests (parameter combinations, parallel processing)
+  - Edge cases (empty DataFrame, no trades, single row, all NaN signals)
+  - Integration tests (full workflow with regime detection)
+- **DONE** - `notebooks/combiner_guide.ipynb` - Signal combination user guide:
+  - Setup and installation instructions
+  - Understanding signal combination (direction + entry + exit)
+  - HybridSignalCombiner basics and configuration
+  - Entry and exit logic explanation
+  - Position flipping mechanics
+  - Regime alignment modes (strict vs loose)
+  - Trade metadata and summary statistics
+  - Grid search for optimal signal combinations
+  - Complete workflow example
+  - Best practices and tips
+- **DONE** - `results_analysis_optimizer.md` - Strategy optimizer module review:
+  - Functional & code quality analysis
+  - Compliance & standards review
+  - Devil's advocate vulnerability assessment
+  - 38 issues identified (3 Critical, 13 High, 17 Medium, 5 Low)
+- **DONE** - `tests/test_optimizer.py` - Comprehensive tests for StrategyOptimizer:
+  - Initialization and validation tests
+  - Grid search tests (empty grid, large grid, combination limits)
+  - Walk-forward tests (segment handling, metric selection)
+  - Sensitivity analysis tests (float comparison, edge cases)
+  - Edge cases (empty DataFrame, single row, missing columns)
+  - Worker function tests
+- **PENDING** - Additional test suite (test_signals.py)
+
+### Fixed
+- **DONE** - Broken imports in `signals.py` - Implemented missing functions:
+  - `regime_sma()` - SMA-based regime signal
+  - `regime_ema()` - EMA-based regime signal
+  - `regime_breakout()` - Breakout regime signal
+  - `turtle_trader()` - Turtle trading signal
+- **DONE** - Critical bugs in `position_sizing.py`:
+  - Fixed sign error in `eqty_risk_shares()` - now uses `abs(sl - px)` for risk calculation
+  - Added division by zero protection in `eqty_risk_shares()` and `risk_appetite()`
+  - Fixed float equality check - now uses tolerance comparison instead of exact `==`
+  - Added constructor validation for all parameters
+  - Added type hints to `__init__`, `eqty_risk_shares()`, and `risk_appetite()`
+  - Fixed indentation issue in `run_position_sizing_parallel()`
+- **DONE** - Critical bugs in `yfinance_handler.py`:
+  - Fixed `set_index('date')` not assigned in `get_ohlc_data()` (line 213)
+  - Fixed date column inconsistency ('Date' vs 'date') in `get_combined_data()`
+  - Fixed `get_info()` to raise exception instead of silent `{}` return
+  - Fixed Python 3.9+ incompatible type hint `list[str]` -> `List[str]`
+  - Fixed logger handler duplication causing memory leak
+  - Added symbol validation with regex to prevent invalid/malicious inputs
+  - Added path traversal protection in cache file handling
+  - Added cache expiration (max_age_hours parameter)
+  - Added atomic cache writes (temp file + rename)
+- **DONE** - Critical bugs in `ohlcprocessor.py`:
+  - Fixed division by zero - added check for zero values before division
+  - Fixed premature rounding - now rounds only final results, not intermediate values
+  - Changed warnings to exceptions for invalid calculation results (NaN/inf)
+  - Added check for negative infinity using `np.isinf()`
+  - Added check for negative benchmark values
+  - Added missing data threshold (10%) before forward-fill is allowed
+  - Added module-level docstring
+  - Added instance variable type hints (`self.columns: OHLCColumns`, `self.logger: logging.Logger`)
+- **DONE** - Critical bugs in `returns.py`:
+  - Fixed `assign(inplace=True)` bug - pandas assign() has no inplace parameter, was causing silent failures
+  - Replaced with direct column assignment loop when inplace=True
+  - Added minimum rows validation (requires >= 2 rows for diff/shift operations)
+  - Added error logging before all exceptions for better debugging
+  - Added log returns clipping to prevent -inf from log1p(-1)
+  - Added comprehensive docstrings with Args, Returns, Raises sections
+  - Removed unused `_cache` instance variable
+- **DONE** - Critical bugs in `stop_loss.py`:
+  - Fixed division by zero in `classified_pivot_stop_loss` - added zero-price guard
+  - Added signal column validation (`_validate_signal_column`) to all methods
+  - Added percentage validation (must be between 0 and 1) in `fixed_percentage_stop_loss`
+  - Added multiplier validation (must be positive) in `atr_stop_loss` and `volatility_std_stop_loss`
+  - Added window validation helper (`_validate_window`) used consistently
+  - Added MIN_STOP_PRICE floor (0.01) to prevent negative stop-loss values
+  - Fixed Python 3.9+ incompatible type hint `dict[str, pd.Series]` -> `Dict[str, pd.Series]`
+  - Added missing 'classified_pivot' to `get_stop_loss` method_map
+  - Removed unused parameters (`retest_threshold`, `magnitude_level`) from `classified_pivot_stop_loss`
+  - Made `swing_window` and `atr_multiplier` configurable parameters
+  - Added `forward_fill` parameter to all stop-loss methods for consistency
+  - Added data quality warning when high < low in ATR calculation
+  - Added comprehensive logging throughout module
+  - Added module-level docstring with usage example
+  - Added comprehensive docstrings with Args, Returns, Raises to all public methods
+- **DONE** - Critical bugs in `optimizer.py`:
+  - Fixed `compare_signals` method - was calling `rolling_walk_forward` with non-existent `signals` parameter
+  - Fixed `rolling_walk_forward` return type - changed from Dict to Tuple to match actual return
+  - Fixed column naming mismatch - now tries both v1 and v2 naming conventions for compatibility
+  - Fixed float comparison in `sensitivity_analysis` - now uses `np.isclose()` instead of `==`
+  - Fixed stability CV calculation - now uses `abs(mean_val) > FLOAT_TOLERANCE` instead of `mean_val != 0`
+  - Added DataFrame validation in `get_equity` - checks for empty and minimum rows
+  - Added grid combination limit (MAX_GRID_COMBINATIONS=10000) to prevent memory bombs
+  - Added filename sanitization to prevent path traversal attacks
+  - Made Excel output optional via `save_output` parameter (default False)
+  - Added proper error handling for file write operations
+  - Added validation for `opt_metric` column existence before use
+  - Added check for all-NaN metric values in walk-forward
+  - Replaced all `print()` statements with proper `logging` calls
+  - Removed debug artifact `print('qui')`
+  - Removed ~100 lines of commented-out code
+  - Removed unused `tqdm` import
+  - Fixed import ordering per PEP 8
+  - Fixed type hints - changed `callable` to `Callable` from typing
+  - Added `-> None` return type to `__init__`
+  - Added module docstring with usage example
+  - Added `__all__` export list
+  - Added comprehensive docstrings with Args, Returns, Raises to all methods
+  - Added constants for magic numbers (MIN_SEGMENT_SIZE, MIN_SEGMENT_ROWS, FLOAT_TOLERANCE)
+- **DONE** - Additional critical bugs in `optimizer.py` (agent team review):
+  - Fixed `stop_method` not passed through grid search - was using default 'atr' for all evaluations
+  - Fixed `_worker_evaluate()` to accept and pass `stop_method` and `price_col` parameters
+  - Fixed `run_grid_search()` to accept and pass `stop_method` and `price_col` parameters
+  - Fixed parameter name mismatch: `close_col` -> `price_col` in OOS evaluation
+  - Fixed `sensitivity_analysis()` to pass `stop_method` and `close_col` to grid search
+  - Added validation for empty parameter values in param_grid
+  - Added MAX_PARAM_VALUES (1000) limit per parameter to prevent memory bombs
+  - Added validation that raises ValueError when all walk-forward segments are skipped
+  - Added NaN warning in `get_equity()` for metrics with NaN values
+  - Added CV cap (MAX_CV_VALUE=10.0) to prevent extreme values from near-zero means
+  - Added MIN_PEAK_VALUE (1e-6) check in sensitivity analysis to prevent division issues
+  - Added type hints and docstring to nested `matches_params()` function
+  - Added PARAM_MATCH_RTOL, PARAM_ROUND_DECIMALS, JOBLIB_VERBOSE_LEVEL constants
+  - Fixed integer rounding in sensitivity analysis to always include original best_val
+  - Updated `results_analysis_optimizer.md` with comprehensive 3-agent team review (41 issues found)
+
+### Changed
+- **DONE** - Refactored regime detection into unified subpackage:
+  - Created `algoshort/regimes/` subpackage with hybrid architecture
+  - Extracted common utilities from `regime_ma.py` and `regime_bo.py` to `base.py`
+  - Eliminated code duplication (`_lower_upper_OHLC()` now in base class)
+  - Standardized interfaces across all regime detectors
+  - Added comprehensive logging to all regime methods
+  - Legacy modules (`regime_ma.py`, `regime_bo.py`, `regime_fc.py`) remain for backward compatibility
+- **DONE** - Updated `algoshort/__init__.py`:
+  - Added exports for new `RegimeDetector` and individual detector classes
+  - Maintained backward compatibility exports for legacy modules
+  - Added package version (`__version__ = "0.2.0"`)
+  - Added comprehensive `__all__` list
+- **DONE** - Removed `.env` from git tracking (file still exists locally)
+- **DONE** - Cleaned up `position_sizing.py`:
+  - Removed unused imports (`Tuple`, `ProcessPoolExecutor`, `as_completed`, `partial`)
+  - Removed ~30 lines of commented-out code
+- **DONE** - Cleaned up `yfinance_handler.py`:
+  - Removed unused imports (`timedelta`, `warnings`)
+  - Removed commented-out code block (lines 303-305)
+  - Added `re` import for symbol validation
+- **DONE** - Enhanced `ohlcprocessor.py`:
+  - Added `numpy` import for `np.isinf()` check
+- **DONE** - Cleaned up `returns.py`:
+  - Removed 405 lines of commented-out dead code (68% of file was dead code)
+  - Added module-level docstring with usage example
+  - Removed unused tqdm import reference
+- **DONE** - Enhanced `stop_loss.py`:
+  - Reordered imports per PEP 8 (stdlib first, then third-party)
+  - Added Optional type hints to all optional parameters
+  - Removed commented-out code (alternative TR calculation)
+  - Added type hints to all methods
+
+---
+
+## [0.1.0] - 2024-XX-XX
+
+### Added
+- Initial release
+- YFinanceDataHandler for financial data management
+- Regime detection modules (floor/ceiling, moving average, breakout)
+- Stop-loss calculation strategies
+- Position sizing algorithms
+- Strategy metrics and optimization tools

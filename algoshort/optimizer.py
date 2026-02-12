@@ -41,7 +41,13 @@ logger = logging.getLogger(__name__)
 MIN_SEGMENT_SIZE = 20
 MIN_SEGMENT_ROWS = 30
 MAX_GRID_COMBINATIONS = 10000
+MAX_PARAM_VALUES = 1000
 FLOAT_TOLERANCE = 1e-10
+PARAM_MATCH_RTOL = 1e-5
+PARAM_ROUND_DECIMALS = 6
+JOBLIB_VERBOSE_LEVEL = 10
+MIN_PEAK_VALUE = 1e-6
+MAX_CV_VALUE = 10.0
 
 __all__ = [
     'get_equity',
@@ -227,6 +233,14 @@ def get_equity(
         clean_key = key.replace(f'{signal}_equity_', '').replace(f'{signal}_', '')
         normalized_row[clean_key] = value
 
+    # Warn about NaN values in metrics (don't fail, but log for debugging)
+    nan_keys = [k for k, v in normalized_row.items() if pd.isna(v) and k != 'date']
+    if nan_keys:
+        logger.warning(
+            "Segment %d has NaN values in metrics: %s",
+            segment_idx, nan_keys
+        )
+
     # Add useful metadata
     result = normalized_row.copy()
     result['segment_idx'] = segment_idx
@@ -254,6 +268,8 @@ def _worker_evaluate(
     param_kwargs: Dict[str, Any],
     equity_func: Callable[..., Dict[str, Any]],
     config_path: str,
+    stop_method: str = 'atr',
+    price_col: str = 'close',
 ) -> Dict[str, Any]:
     """
     Standalone worker for parallel grid search evaluation.
@@ -261,9 +277,11 @@ def _worker_evaluate(
     Args:
         segment_data: DataFrame segment to evaluate
         segment_idx: Index of the segment
-        param_kwargs: Parameters to pass to equity_func
+        param_kwargs: Parameters to pass to equity_func (stop-loss kwargs)
         equity_func: Callable that returns performance metrics
         config_path: Path to configuration file
+        stop_method: Stop-loss method to use
+        price_col: Price column name for equity calculations
 
     Returns:
         Dict containing metrics merged with param_kwargs
@@ -275,6 +293,8 @@ def _worker_evaluate(
         segment_data,
         segment_idx=segment_idx,
         config_path=config_path,
+        stop_method=stop_method,
+        price_col=price_col,
         **param_kwargs
     )
 
@@ -396,6 +416,8 @@ class StrategyOptimizer:
         segment_data: pd.DataFrame,
         param_grid: Dict[str, Iterable[Any]],
         segment_idx: int,
+        stop_method: str = 'atr',
+        price_col: str = 'close',
         n_jobs: int = 1,
         progress: bool = False,
         backend: str = "loky",
@@ -408,6 +430,8 @@ class StrategyOptimizer:
             segment_data: DataFrame segment to evaluate
             param_grid: Dict mapping parameter names to lists of values
             segment_idx: Index of the segment
+            stop_method: Stop-loss method to use for all evaluations
+            price_col: Price column name for equity calculations
             n_jobs: Number of parallel jobs (-1 for all CPUs)
             progress: Whether to show progress (not implemented)
             backend: Joblib backend ('loky', 'threading', 'multiprocessing')
@@ -418,8 +442,8 @@ class StrategyOptimizer:
             metrics and parameter values
 
         Raises:
-            ValueError: If param_grid is empty or n_jobs is 0
-            RuntimeError: If grid has too many combinations
+            ValueError: If param_grid is empty, has empty values, or n_jobs is 0
+            RuntimeError: If grid has too many combinations or too many param values
         """
         if not param_grid:
             raise ValueError("param_grid required")
@@ -428,8 +452,19 @@ class StrategyOptimizer:
         if n_jobs < 0:
             n_jobs = -1
 
+        # Validate param_grid values and convert to lists with bounds checking
         param_names = list(param_grid.keys())
-        param_values_lists = [list(v) for v in param_grid.values()]
+        param_values_lists = []
+        for name, values in param_grid.items():
+            values_list = list(values)
+            if not values_list:
+                raise ValueError(f"Parameter '{name}' has no values")
+            if len(values_list) > MAX_PARAM_VALUES:
+                raise RuntimeError(
+                    f"Parameter '{name}' has {len(values_list)} values, "
+                    f"exceeds limit of {MAX_PARAM_VALUES}"
+                )
+            param_values_lists.append(values_list)
 
         # Calculate total combinations before creating
         n_combinations = 1
@@ -461,6 +496,8 @@ class StrategyOptimizer:
                 param_kwargs=dict(zip(param_names, combo)),
                 equity_func=self.equity_func,
                 config_path=self.config_path,
+                stop_method=stop_method,
+                price_col=price_col,
             )
             for combo in all_combos
         ]
@@ -472,7 +509,7 @@ class StrategyOptimizer:
                 n_jobs=n_jobs,
                 backend=effective_backend,
                 prefer=prefer,
-                verbose=10 if n_jobs > 1 else 0,
+                verbose=JOBLIB_VERBOSE_LEVEL if n_jobs > 1 else 0,
             )(tasks)
         except Exception as e:
             if "pickle" in str(e).lower() and effective_backend == "loky":
@@ -614,6 +651,8 @@ class StrategyOptimizer:
                 segment_data=is_data,
                 param_grid=param_grid,
                 segment_idx=i,
+                stop_method=stop_method,
+                price_col=close_col,
                 n_jobs=n_jobs,
                 progress=progress,
                 backend="loky",
@@ -656,7 +695,7 @@ class StrategyOptimizer:
             oos_row = self._evaluate_params(
                 segment_data=oos_data,
                 stop_method=stop_method,
-                close_col=close_col,
+                price_col=close_col,
                 segment_idx=i,
                 **best_params
             )
@@ -664,6 +703,14 @@ class StrategyOptimizer:
             oos_rows.append(oos_row)
 
         oos_df = pd.DataFrame(oos_rows)
+
+        # Validate that at least one segment was processed
+        if not oos_rows:
+            raise ValueError(
+                f"All {n_segments} segments were skipped due to insufficient data. "
+                f"Need at least {MIN_SEGMENT_ROWS} rows per segment. "
+                f"Total data: {n} rows, segment_size: {segment_size} rows."
+            )
 
         # Calculate stability metrics
         if len(param_history) >= 2:
@@ -675,7 +722,9 @@ class StrategyOptimizer:
                 if col in hist_df.columns:
                     mean_val = hist_df[col].mean()
                     if abs(mean_val) > FLOAT_TOLERANCE:
-                        stability[f"{param}_cv"] = hist_df[col].std() / abs(mean_val)
+                        cv = hist_df[col].std() / abs(mean_val)
+                        # Cap CV to prevent extreme values from near-zero means
+                        stability[f"{param}_cv"] = min(cv, MAX_CV_VALUE)
                     else:
                         stability[f"{param}_cv"] = np.nan
                 else:
@@ -733,11 +782,14 @@ class StrategyOptimizer:
                 if isinstance(best_val, (int, float)):
                     factors = [1 - variance, 1, 1 + variance]
                     if isinstance(best_val, int):
+                        # Ensure best_val is included even after rounding
                         param_grid[param] = sorted(set(
-                            int(best_val * f) for f in factors
+                            [int(best_val * f) for f in factors] + [best_val]
                         ))
                     else:
-                        param_grid[param] = [round(best_val * f, 6) for f in factors]
+                        param_grid[param] = [
+                            round(best_val * f, PARAM_ROUND_DECIMALS) for f in factors
+                        ]
                 else:
                     param_grid[param] = [best_val]
 
@@ -745,6 +797,8 @@ class StrategyOptimizer:
             segment_data=self.data,
             param_grid=param_grid,
             segment_idx=-1,
+            stop_method=stop_method,
+            price_col=close_col,
         )
 
         if results.empty:
@@ -757,12 +811,13 @@ class StrategyOptimizer:
             )
 
         # Find peak using tolerance-based comparison for floats
-        def matches_params(row):
+        def matches_params(row: pd.Series) -> bool:
+            """Check if row parameters match best_params within tolerance."""
             for k, v in best_params.items():
                 if k not in row:
                     return False
                 if isinstance(v, float):
-                    if not np.isclose(row[k], v, rtol=1e-5):
+                    if not np.isclose(row[k], v, rtol=PARAM_MATCH_RTOL):
                         return False
                 elif row[k] != v:
                     return False
@@ -780,10 +835,15 @@ class StrategyOptimizer:
         peak_val = peak.iloc[0]
         avg_val = results[opt_metric].mean()
 
-        if abs(peak_val) > FLOAT_TOLERANCE:
+        # Use MIN_PEAK_VALUE to avoid division by very small numbers
+        if abs(peak_val) > MIN_PEAK_VALUE:
             plateau_ratio_pct = (avg_val / peak_val) * 100
         else:
             plateau_ratio_pct = np.nan
+            logger.warning(
+                "Peak value %.2e is too small for meaningful plateau ratio",
+                peak_val
+            )
 
         return plateau_ratio_pct, results
 
