@@ -125,6 +125,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Compliance & standards review
   - Devil's advocate vulnerability assessment
   - 38 issues identified (3 Critical, 13 High, 17 Medium, 5 Low)
+- **DONE** - `results_analysis_plots.md` - Plots module review:
+  - Functional & code quality analysis (14 issues)
+  - Compliance & standards review (7 issues + 3 documentation)
+  - Devil's advocate security & edge cases (11 issues)
+  - 112 issues identified (4 Critical, 14 High, 18 Medium, 6 Low)
+- **DONE** - `tests/test_plots.py` - Comprehensive tests for plots module:
+  - Validation helper function tests
+  - All 14 plot function tests with valid input
+  - Edge cases (empty DataFrame, missing columns, None ticker)
+  - Parameter validation tests (negative/zero window values)
+  - Memory leak prevention verification
+  - Already-indexed DataFrame handling
 - **DONE** - `tests/test_optimizer.py` - Comprehensive tests for StrategyOptimizer:
   - Initialization and validation tests
   - Grid search tests (empty grid, large grid, combination limits)
@@ -230,6 +242,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added PARAM_MATCH_RTOL, PARAM_ROUND_DECIMALS, JOBLIB_VERBOSE_LEVEL constants
   - Fixed integer rounding in sensitivity analysis to always include original best_val
   - Updated `results_analysis_optimizer.md` with comprehensive 3-agent team review (41 issues found)
+- **DONE** - Critical bugs in `plots.py` (agent team review - 112 issues):
+  - Fixed `plot_abs_rel`: Changed `plt.show(plot1)` to `plt.show()` (invalid argument)
+  - Fixed `plot_regime_abs` and `plot_regime_rel`: Removed call to undefined `graph_regime_combo`
+  - Reimplemented regime plotting with simplified visualization (close + regime + floor/ceiling markers)
+  - Added `_validate_dataframe()` helper: validates type, empty, required columns, handles date indexing
+  - Added `_validate_ticker()` helper: validates ticker is not None or empty
+  - Added `_validate_positive_int()` helper: validates window/period parameters
+  - Added `_close_figure()` helper: closes figure after plt.show() to prevent memory leaks
+  - Added memory leak prevention: `plt.close()` after every `plt.show()` call in all 14 functions
+  - All functions now work on DataFrame copy to avoid modifying original data
+  - All functions now handle both date column and pre-indexed DataFrames
+  - Added module docstring with usage example
+  - Added `__all__` export list with all 13 public functions
+  - Added type hints to all functions (returns `Tuple[plt.Figure, plt.Axes]`)
+  - Added comprehensive docstrings with Args, Returns, Raises sections
+  - Added constants: DEFAULT_FIG_WIDTH, DEFAULT_FIG_HEIGHT, DATE_COLUMN, CLOSE_COLUMN, RCLOSE_COLUMN
+  - Added logging throughout module
+  - Renamed `plot_PL` to `plot_profit_loss` (added alias `plot_PL` for backward compatibility)
+  - Removed all commented-out code (lines 5-11, 68, 86, 145-146)
+  - Fixed pointless `str.upper('')` calls (now only uppercases when ticker is provided)
+  - Fixed missing imports: all imports now explicit and organized per PEP 8
+  - Fixed line length violations (all lines now under 100 chars)
+  - Fixed missing whitespace after commas
+  - Fixed trailing whitespace
 
 ### Changed
 - **DONE** - Refactored regime detection into unified subpackage:
