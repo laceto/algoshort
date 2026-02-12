@@ -34,6 +34,15 @@ from algoshort.stop_loss import StopLossCalculator
 from algoshort.position_sizing import PositionSizing, run_position_sizing_parallel
 from algoshort.returns import ReturnsCalculator
 
+# Trading summary
+from algoshort.trading_summary import (
+    get_trading_summary,
+    get_multi_symbol_summary,
+    print_trading_summary,
+    print_multi_symbol_summary,
+    create_trading_dashboard,
+)
+
 # Legacy regime modules (for backward compatibility)
 from algoshort.regime_ma import TripleMACrossoverRegime
 from algoshort.regime_bo import RegimeBO
@@ -57,6 +66,12 @@ __all__ = [
     "PositionSizing",
     "run_position_sizing_parallel",
     "ReturnsCalculator",
+    # Trading summary
+    "get_trading_summary",
+    "get_multi_symbol_summary",
+    "print_trading_summary",
+    "print_multi_symbol_summary",
+    "create_trading_dashboard",
     # Legacy (backward compatibility)
     "TripleMACrossoverRegime",
     "RegimeBO",
