@@ -1,43 +1,110 @@
+"""
+Signal generation module for algoshort.
+
+This module provides functions to generate trading signals based on various
+regime detection methods including breakout, moving averages, and turtle trading.
+"""
 import numpy as np
 import pandas as pd
 from algoshort.utils import lower_upper_OHLC
-from algoshort.regime_bo import regime_breakout, regime_ema, regime_sma, turtle_trader
 
-# def regime_sma(df,_c,st,lt):
-#     '''
-#     bull +1: sma_st >= sma_lt , bear -1: sma_st <= sma_lt
-#     '''
-#     sma_lt = df[_c].rolling(lt).mean()
-#     sma_st = df[_c].rolling(st).mean()
-#     rg_sma = np.sign(sma_st - sma_lt)
-#     return rg_sma
 
-# def regime_ema(df,_c,st,lt):
-#     '''
-#     bull +1: ema_st >= ema_lt , bear -1: ema_st <= ema_lt
-#     '''
-#     ema_st = df[_c].ewm(span=st,min_periods = st).mean()
-#     ema_lt = df[_c].ewm(span=lt,min_periods = lt).mean()
-#     rg_ema = np.sign(ema_st - ema_lt)
-#     return rg_ema
+def regime_sma(df: pd.DataFrame, _c: str, st: int, lt: int) -> pd.Series:
+    """
+    Compute SMA-based regime signal.
 
-# def turtle_trader(df, _h, _l, slow, fast):
-#     '''
-#     _slow: Long/Short direction
-#     _fast: trailing stop loss
-#     '''
-#     _slow = regime_breakout(df,_h,_l,window = slow)
-#     _fast = regime_breakout(df,_h,_l,window = fast)
-#     turtle = pd. Series(index= df.index, 
-#                         data = np.where(_slow == 1,np.where(_fast == 1,1,0), 
-#                                 np.where(_slow == -1, np.where(_fast ==-1,-1,0),0)))
-#     return turtle
+    Bull (+1): sma_st >= sma_lt
+    Bear (-1): sma_st <= sma_lt
 
-# def regime_breakout(df,_h,_l,window):
-#     hl =  np.where(df[_h] == df[_h].rolling(window).max(),1,
-#                                 np.where(df[_l] == df[_l].rolling(window).min(), -1,np.nan))
-#     roll_hl = pd.Series(index= df.index, data= hl).ffill()
-#     return roll_hl
+    Args:
+        df: DataFrame containing price data
+        _c: Column name for close price
+        st: Short-term window
+        lt: Long-term window
+
+    Returns:
+        pd.Series: Regime signal values (+1, -1, or 0)
+    """
+    sma_lt = df[_c].rolling(lt).mean()
+    sma_st = df[_c].rolling(st).mean()
+    rg_sma = np.sign(sma_st - sma_lt)
+    return rg_sma
+
+
+def regime_ema(df: pd.DataFrame, _c: str, st: int, lt: int) -> pd.Series:
+    """
+    Compute EMA-based regime signal.
+
+    Bull (+1): ema_st >= ema_lt
+    Bear (-1): ema_st <= ema_lt
+
+    Args:
+        df: DataFrame containing price data
+        _c: Column name for close price
+        st: Short-term window
+        lt: Long-term window
+
+    Returns:
+        pd.Series: Regime signal values (+1, -1, or 0)
+    """
+    ema_st = df[_c].ewm(span=st, min_periods=st).mean()
+    ema_lt = df[_c].ewm(span=lt, min_periods=lt).mean()
+    rg_ema = np.sign(ema_st - ema_lt)
+    return rg_ema
+
+
+def regime_breakout(df: pd.DataFrame, _h: str, _l: str, window: int) -> pd.Series:
+    """
+    Compute breakout regime signal.
+
+    +1 when high equals rolling max high
+    -1 when low equals rolling min low
+
+    Args:
+        df: DataFrame containing OHLC data
+        _h: Column name for high price
+        _l: Column name for low price
+        window: Lookback window for rolling calculations
+
+    Returns:
+        pd.Series: Regime signal values (+1 or -1, forward-filled)
+    """
+    hl = np.where(
+        df[_h] == df[_h].rolling(window).max(), 1,
+        np.where(df[_l] == df[_l].rolling(window).min(), -1, np.nan)
+    )
+    roll_hl = pd.Series(index=df.index, data=hl).ffill()
+    return roll_hl
+
+
+def turtle_trader(df: pd.DataFrame, _h: str, _l: str, slow: int, fast: int) -> pd.Series:
+    """
+    Compute Turtle Trader regime signal.
+
+    Uses dual-window breakout:
+    - slow window: Long/Short direction
+    - fast window: trailing stop loss
+
+    Args:
+        df: DataFrame containing OHLC data
+        _h: Column name for high price
+        _l: Column name for low price
+        slow: Slow window for direction
+        fast: Fast window for trailing stop
+
+    Returns:
+        pd.Series: Regime signal values (+1 for long, -1 for short, 0 for neutral)
+    """
+    _slow = regime_breakout(df, _h, _l, window=slow)
+    _fast = regime_breakout(df, _h, _l, window=fast)
+    turtle = pd.Series(
+        index=df.index,
+        data=np.where(
+            _slow == 1, np.where(_fast == 1, 1, 0),
+            np.where(_slow == -1, np.where(_fast == -1, -1, 0), 0)
+        )
+    )
+    return turtle
 
 def signal_bo(df, window):
     

@@ -1,10 +1,10 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+import re
+from datetime import datetime
 from typing import Union, List, Dict, Optional, Tuple, Literal
 import logging
-import warnings
 from pathlib import Path
 
 class YFinanceDataHandler:
@@ -43,14 +43,15 @@ class YFinanceDataHandler:
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.chunk_size = max(1, chunk_size)  # Ensure at least 1
         
-        # Setup class-specific logger
+        # Setup class-specific logger (avoid duplicate handlers)
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-        if enable_logging:
+        if enable_logging and not self.logger.handlers:
             handler = logging.StreamHandler()
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
             handler.setFormatter(formatter)
             self.logger.addHandler(handler)
             self.logger.setLevel(log_level)
+            self.logger.propagate = False
         
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -210,9 +211,9 @@ class YFinanceDataHandler:
             if data.columns[0].lower() in ['date', 'datetime'] or 'date' not in data.columns:
                 data = data.rename(columns={data.columns[0]: 'date'})
 
-            data.set_index('date')
+            data = data.set_index('date')  # Fixed: assign result
             data.columns.name = None
-            
+
             return data
             
         except Exception as e:
@@ -250,14 +251,15 @@ class YFinanceDataHandler:
                     data = self.get_data(symbol, columns)
                     if not data.empty:
                         symbol_data = data.copy().reset_index()
+                        symbol_data.columns = symbol_data.columns.str.lower()  # Standardize to lowercase
                         symbol_data['symbol'] = symbol
-                        
-                        # Ensure 'Date' column is present before reordering
-                        if 'Date' in symbol_data.columns:
-                            cols = ['Date', 'symbol'] + [col for col in symbol_data.columns if col not in ['Date', 'symbol']]
+
+                        # Ensure 'date' column is present before reordering
+                        if 'date' in symbol_data.columns:
+                            cols = ['date', 'symbol'] + [col for col in symbol_data.columns if col not in ['date', 'symbol']]
                             symbol_data = symbol_data[cols]
                         else:
-                            self.logger.warning(f"Skipping {symbol} due to missing 'Date' column.")
+                            self.logger.warning(f"Skipping {symbol} due to missing 'date' column.")
                             continue
 
                         combined_rows.append(symbol_data)
@@ -270,10 +272,10 @@ class YFinanceDataHandler:
 
             if combined_rows:
                 result = pd.concat(combined_rows, ignore_index=True)
-                return result.sort_values(['Date', 'symbol']).reset_index(drop=True)
+                return result.sort_values(['date', 'symbol']).reset_index(drop=True)
             else:
                 # Return an empty DataFrame with a consistent schema
-                return pd.DataFrame(columns=['Date', 'symbol'])
+                return pd.DataFrame(columns=['date', 'symbol'])
 
     def get_multiple_symbols_data(self, symbols: List[str], column: str = 'close') -> pd.DataFrame:
         """
@@ -300,10 +302,6 @@ class YFinanceDataHandler:
             
             for symbol in symbols:
                 try:
-                    # if symbol not in self.data:
-                    #     self.logger.info(f"Downloading missing data for {symbol}")
-                    #     self.download_data(symbol)
-                    
                     data = self.get_data(symbol, [column])
                     if not data.empty:
                         data_reset = data.reset_index()
@@ -339,26 +337,28 @@ class YFinanceDataHandler:
     def get_info(self, symbol: str) -> Dict:
         """
         Get company information for a symbol.
-        
+
         Args:
             symbol (str): Stock symbol
-            
+
         Returns:
             Dict: Company information from yfinance
-            
+
         Raises:
             Exception: If unable to retrieve information
         """
-        
         try:
             ticker = yf.Ticker(symbol)
             info = ticker.info
+            if not info:
+                self.logger.warning(f"No info available for {symbol}")
+                return {}
             self.logger.info(f"Retrieved company info for {symbol}")
             return info
-            
+
         except Exception as e:
             self.logger.error(f"Error getting info for {symbol}: {str(e)}")
-            return {}
+            raise  # Re-raise instead of silent failure
 
 
 
@@ -436,7 +436,7 @@ class YFinanceDataHandler:
                     
         return cached_files
 
-    def list_cached_symbols(self) -> list[str]:
+    def list_cached_symbols(self) -> List[str]:
             """
             Scans the cache directory and returns a list of all unique cached symbols.
 
@@ -575,21 +575,80 @@ class YFinanceDataHandler:
     # Private helper methods
     
     def _preprocess_symbols(self, symbols: Union[str, List[str]]) -> List[str]:
-        """Preprocess and validate symbol inputs."""
+        """
+        Preprocess and validate symbol inputs.
+
+        Args:
+            symbols: Single symbol string or list of symbol strings.
+
+        Returns:
+            List of validated, uppercase symbol strings.
+
+        Raises:
+            TypeError: If symbols is not a string or list of strings.
+            ValueError: If symbol format is invalid or empty.
+        """
         if isinstance(symbols, str):
-            return [symbols.upper()]
-        elif isinstance(symbols, list):
-            return [s.upper() for s in symbols if isinstance(s, str)]
-        else:
+            symbols = [symbols]
+        elif not isinstance(symbols, list):
             raise TypeError("Symbols must be a string or list of strings")
+
+        validated = []
+        for s in symbols:
+            if not isinstance(s, str):
+                raise TypeError(f"Symbol must be string, got {type(s).__name__}")
+            cleaned = s.strip().upper()
+            if not cleaned:
+                raise ValueError("Empty symbol not allowed")
+            # Only allow valid ticker characters (letters, numbers, ., -, ^, =)
+            if not re.match(r'^[A-Z0-9.\-\^=]+$', cleaned):
+                raise ValueError(f"Invalid symbol format: '{s}'")
+            validated.append(cleaned)
+
+        if not validated:
+            raise ValueError("No valid symbols provided")
+        return validated
 
     def _validate_and_map_params(self, period: str, interval: str) -> Tuple[str, str]:
         """Validate and map period/interval parameters."""
         period = self.period_map.get(period, period)
         interval = self.interval_map.get(interval, interval)
-        
+
         self._validate_period_interval(period, interval)
         return period, interval
+
+    def _get_safe_cache_path(self, symbol: str, period: str, interval: str) -> Path:
+        """
+        Generate safe cache file path, preventing path traversal attacks.
+
+        Args:
+            symbol: Stock symbol (will be sanitized).
+            period: Data period.
+            interval: Data interval.
+
+        Returns:
+            Safe Path object within cache_dir.
+
+        Raises:
+            ValueError: If sanitized path would escape cache_dir.
+        """
+        # Sanitize all components to prevent path traversal
+        safe_symbol = re.sub(r'[^A-Z0-9_\-]', '_', symbol.upper())
+        safe_period = re.sub(r'[^a-z0-9]', '_', period.lower())
+        safe_interval = re.sub(r'[^a-z0-9]', '_', interval.lower())
+
+        cache_file = self.cache_dir / f"{safe_symbol}_{safe_period}_{safe_interval}.parquet"
+
+        # Verify resolved path stays within cache_dir
+        try:
+            resolved = cache_file.resolve()
+            cache_resolved = self.cache_dir.resolve()
+            if not str(resolved).startswith(str(cache_resolved)):
+                raise ValueError(f"Invalid symbol causes path traversal: {symbol}")
+        except (OSError, ValueError) as e:
+            raise ValueError(f"Invalid cache path for symbol {symbol}: {e}")
+
+        return cache_file
 
     def _separate_cached_symbols(self, symbols: List[str], period: str, interval: str, 
                                 use_cache: bool) -> Tuple[List[str], List[str]]:
@@ -643,21 +702,43 @@ class YFinanceDataHandler:
         """Split symbols into chunks for efficient downloading."""
         return [symbols[i:i + self.chunk_size] for i in range(0, len(symbols), self.chunk_size)]
 
-    def _load_from_cache(self, symbol: str, period: str, interval: str) -> Optional[pd.DataFrame]:
-        """Load data from cache if available."""
+    def _load_from_cache(self, symbol: str, period: str, interval: str,
+                         max_age_hours: int = 24) -> Optional[pd.DataFrame]:
+        """
+        Load data from cache if available and not stale.
+
+        Args:
+            symbol: Stock symbol.
+            period: Data period.
+            interval: Data interval.
+            max_age_hours: Maximum cache age in hours (default 24).
+
+        Returns:
+            Cached DataFrame or None if not available/stale.
+        """
         if not self.cache_dir:
             return None
-            
-        cache_file = self.cache_dir / f"{symbol}_{period}_{interval}.parquet"
-        
+
+        try:
+            cache_file = self._get_safe_cache_path(symbol, period, interval)
+        except ValueError as e:
+            self.logger.warning(f"Invalid cache path for {symbol}: {e}")
+            return None
+
         if cache_file.exists():
             try:
+                # Check cache age
+                file_age_seconds = datetime.now().timestamp() - cache_file.stat().st_mtime
+                if file_age_seconds > max_age_hours * 3600:
+                    self.logger.debug(f"Cache for {symbol} is stale ({file_age_seconds/3600:.1f}h old)")
+                    return None
+
                 cached_data = pd.read_parquet(cache_file)
                 self.logger.debug(f"Loaded {symbol} from cache")
                 return cached_data
             except Exception as e:
                 self.logger.warning(f"Failed to load cache for {symbol}: {e}")
-                
+
         return None
 
     def _download_single_symbol(self, symbol: str, period: str, interval: str,
@@ -755,10 +836,21 @@ class YFinanceDataHandler:
         return data
 
     def _cache_single_symbol(self, symbol: str, data: pd.DataFrame, period: str, interval: str) -> None:
-        """Cache data for a single symbol."""
+        """
+        Cache data for a single symbol with atomic write.
+
+        Args:
+            symbol: Stock symbol.
+            data: DataFrame to cache.
+            period: Data period.
+            interval: Data interval.
+        """
         try:
-            cache_file = self.cache_dir / f"{symbol}_{period}_{interval}.parquet"
-            data.to_parquet(cache_file)
+            cache_file = self._get_safe_cache_path(symbol, period, interval)
+            # Write to temp file first, then atomic rename
+            temp_file = cache_file.with_suffix('.tmp')
+            data.to_parquet(temp_file)
+            temp_file.replace(cache_file)  # Atomic rename
             self.logger.debug(f"Cached data for {symbol}")
         except Exception as e:
             self.logger.warning(f"Failed to cache {symbol}: {e}")

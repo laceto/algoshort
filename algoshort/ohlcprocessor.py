@@ -1,4 +1,20 @@
+"""
+OHLC data processing module for relative price calculations.
+
+This module provides the OHLCProcessor class for calculating asset prices
+relative to a benchmark index or security. Supports custom column naming
+and various normalization options.
+
+Classes:
+    OHLCColumns: Configuration dataclass for OHLC column naming.
+    OHLCProcessor: Main processor for relative price calculations.
+
+Typical usage:
+    processor = OHLCProcessor()
+    relative_data = processor.calculate_relative_prices(stock_df, benchmark_df)
+"""
 import pandas as pd
+import numpy as np
 import logging
 from dataclasses import dataclass
 from typing import Optional
@@ -31,12 +47,12 @@ class OHLCProcessor:
     ):
         """
         Initialize OHLCProcessor.
-        
+
         Args:
             column_config: Custom column naming configuration.
         """
-        self.columns = column_config or OHLCColumns()
-        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        self.columns: OHLCColumns = column_config or OHLCColumns()
+        self.logger: logging.Logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
     
     def calculate_relative_prices(
         self, 
@@ -263,11 +279,20 @@ class OHLCProcessor:
             on='date'
         )
         
-        # Check for missing benchmark values
+        # Check for missing benchmark values with threshold
         missing_bm_count = merged_df['bm'].isna().sum()
+        max_missing_pct = 10.0  # Configurable threshold
+
         if missing_bm_count > 0:
             missing_pct = (missing_bm_count / len(merged_df)) * 100
-            
+
+            if missing_pct > max_missing_pct:
+                raise ValueError(
+                    f"Too much missing benchmark data: {missing_pct:.1f}% "
+                    f"(threshold: {max_missing_pct}%). "
+                    f"Missing {missing_bm_count} of {len(merged_df)} rows."
+                )
+
             # WARNING: Data quality issue that could affect results
             self.logger.warning(
                 "Missing benchmark data for %d rows (%.1f%%). Values will be forward-filled. "
@@ -275,9 +300,10 @@ class OHLCProcessor:
                 missing_bm_count,
                 missing_pct
             )
-        
+
         # Create benchmark adjustment factor (forward-fill missing)
-        merged_df['bmfx'] = merged_df['bm'].round(dgt).ffill()
+        # NOTE: Don't round here - preserve precision for rebase calculation
+        merged_df['bmfx'] = merged_df['bm'].ffill()
         
         # Fail fast: Check for NaN after forward-fill
         if merged_df['bmfx'].isna().any():
@@ -299,26 +325,49 @@ class OHLCProcessor:
                 )
             
             merged_df['bmfx'] = merged_df['bmfx'] / first_bm_value
-        
-        # Calculate relative prices for OHLC columns
+
+        # Check for zero values BEFORE division to prevent inf
+        zero_mask = merged_df['bmfx'] == 0
+        if zero_mask.any():
+            zero_count = zero_mask.sum()
+            zero_dates = merged_df.loc[zero_mask, 'date'].tolist()
+            raise ValueError(
+                f"Benchmark contains zero values at {zero_count} dates. "
+                f"First occurrence: {zero_dates[0]}. "
+                f"Cannot calculate relative prices with zero divisor."
+            )
+
+        # Check for negative values (data quality issue)
+        if (merged_df['bmfx'] < 0).any():
+            neg_count = (merged_df['bmfx'] < 0).sum()
+            raise ValueError(
+                f"Benchmark contains {neg_count} negative values. "
+                f"This indicates data quality issues."
+            )
+
+        # Calculate relative prices for OHLC columns (round only final results)
         merged_df[f'r{_o}'] = (merged_df[_o] / merged_df['bmfx']).round(dgt)
         merged_df[f'r{_h}'] = (merged_df[_h] / merged_df['bmfx']).round(dgt)
         merged_df[f'r{_l}'] = (merged_df[_l] / merged_df['bmfx']).round(dgt)
         merged_df[f'r{_c}'] = (merged_df[_c] / merged_df['bmfx']).round(dgt)
-        
-        # Check for inf/nan in results (indicates division issues)
+
+        # Check for inf/nan in results - RAISE exception, don't just warn
         relative_cols = [f'r{_o}', f'r{_h}', f'r{_l}', f'r{_c}']
         for col in relative_cols:
-            invalid_mask = merged_df[col].isnull() | (merged_df[col] == float('inf'))
+            # Use np.isinf to catch both positive and negative infinity
+            invalid_mask = merged_df[col].isnull() | np.isinf(merged_df[col])
             invalid_count = invalid_mask.sum()
-            
+
             if invalid_count > 0:
-                # WARNING: Unexpected calculation results
-                self.logger.warning(
+                self.logger.error(
                     "Column '%s' contains %d invalid values (NaN/inf). "
                     "This indicates zero or near-zero benchmark values.",
                     col,
                     invalid_count
+                )
+                raise ValueError(
+                    f"Calculation produced {invalid_count} invalid values in '{col}'. "
+                    f"This indicates near-zero benchmark values that passed validation."
                 )
         
         # Drop temporary benchmark columns

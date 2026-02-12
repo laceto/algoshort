@@ -1,8 +1,6 @@
 import pandas as pd
 import numpy as np
-from typing import List, Tuple
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from functools import partial
+from typing import List
 from joblib import Parallel, delayed
 import logging
 
@@ -15,27 +13,63 @@ class PositionSizing:
     share allocations.
     """
     
-    def __init__(self, tolerance, mn, mx, equal_weight, avg, lot, initial_capital=100000):
+    def __init__(
+        self,
+        tolerance: float,
+        mn: float,
+        mx: float,
+        equal_weight: float,
+        avg: float,
+        lot: int,
+        initial_capital: float = 100000
+    ) -> None:
         """
         Initialize the portfolio calculator.
-        
+
         Parameters:
         -----------
         tolerance : float
-            Risk tolerance parameter
+            Risk tolerance parameter (must be negative for drawdown)
         mn : float
-            Minimum risk parameter
+            Minimum risk parameter (must be positive)
         mx : float
-            Maximum risk parameter
+            Maximum risk parameter (must be positive and >= mn)
         equal_weight : float
-            Equal weight allocation factor
+            Equal weight allocation factor (must be in (0, 1])
         avg : float
             Average risk value for fixed strategy
         lot : int
-            Lot size for share calculations
+            Lot size for share calculations (must be positive)
         initial_capital : float, default=100000
-            Initial capital for each strategy
+            Initial capital for each strategy (must be positive)
+
+        Raises:
+        -------
+        ValueError
+            If any parameter fails validation
         """
+        # Validate tolerance (should be negative for drawdown)
+        if tolerance >= 0:
+            raise ValueError(f"tolerance must be negative, got {tolerance}")
+
+        # Validate risk range
+        if mn <= 0 or mx <= 0:
+            raise ValueError(f"mn and mx must be positive: mn={mn}, mx={mx}")
+        if mn > mx:
+            raise ValueError(f"mn must be <= mx: mn={mn}, mx={mx}")
+
+        # Validate equal_weight
+        if not 0 < equal_weight <= 1:
+            raise ValueError(f"equal_weight must be in (0, 1], got {equal_weight}")
+
+        # Validate lot size
+        if lot <= 0:
+            raise ValueError(f"lot must be positive, got {lot}")
+
+        # Validate capital
+        if initial_capital <= 0:
+            raise ValueError(f"initial_capital must be positive, got {initial_capital}")
+
         self.tolerance = tolerance
         self.mn = mn
         self.mx = mx
@@ -44,48 +78,116 @@ class PositionSizing:
         self.lot = lot
         self.initial_capital = initial_capital
 
-    def eqty_risk_shares(self, px, sl, eqty, risk, fx, lot):
-        r = sl - px
-        if fx > 0:
-            budget = eqty * risk * fx
-        else:
-            budget = eqty * risk
-        shares = round(budget // (r * lot) * lot, 0)
-        return shares
+        logger.debug(f"PositionSizing initialized: tolerance={tolerance}, "
+                    f"risk_range=({mn}, {mx}), lot={lot}")
+
+    def eqty_risk_shares(
+        self,
+        px: float,
+        sl: float,
+        eqty: float,
+        risk: float,
+        fx: float,
+        lot: int
+    ) -> int:
+        """
+        Calculate position size based on risk parameters.
+
+        Args:
+            px: Current entry price (must be positive)
+            sl: Stop loss price
+            eqty: Current account equity
+            risk: Risk percentage (e.g., 0.02 for 2%)
+            fx: Foreign exchange rate multiplier
+            lot: Minimum lot size (must be positive)
+
+        Returns:
+            Number of shares rounded to lot size increments
+        """
+        # Validate inputs
+        if px <= 0:
+            logger.warning(f"Invalid price: {px}, returning 0 shares")
+            return 0
+        if lot <= 0:
+            logger.warning(f"Invalid lot size: {lot}, returning 0 shares")
+            return 0
+        if eqty < 0:
+            logger.warning(f"Negative equity: {eqty}, returning 0 shares")
+            return 0
+
+        # Use absolute risk per share to handle both long and short positions
+        risk_per_share = abs(sl - px)
+
+        # Guard against stop loss too close to price (near-zero risk)
+        if risk_per_share < 1e-10:
+            logger.warning(f"Stop loss ({sl}) too close to price ({px})")
+            return 0
+
+        # Calculate budget
+        budget = eqty * risk * (fx if fx > 0 else 1)
+
+        # Calculate shares rounded to lot size
+        num_lots = int(budget / (risk_per_share * lot))
+        shares = num_lots * lot
+
+        return max(0, shares)
     
-    def risk_appetite(self, eqty, tolerance, mn, mx, span, shape):
+    def risk_appetite(
+        self,
+        eqty: pd.Series,
+        tolerance: float,
+        mn: float,
+        mx: float,
+        span: int,
+        shape: int
+    ) -> pd.Series:
         """
         Calculate risk appetite based on equity curve and drawdown.
-        
+
         Parameters:
         -----------
         eqty : pd.Series or array-like
             Equity curve series
         tolerance : float
-            Tolerance for drawdown (<0)
+            Tolerance for drawdown (<0, must be non-zero)
         mn : float
-            Minimum risk
+            Minimum risk (must be positive)
         mx : float
-            Maximum risk
+            Maximum risk (must be positive)
         span : int
             Exponential moving average span to smooth the risk_appetite
         shape : int
-            Convex (>45 deg diagonal) = 1, concave (<diagonal) = -1, 
+            Convex (>45 deg diagonal) = 1, concave (<diagonal) = -1,
             else: simple risk_appetite
-            
+
         Returns:
         --------
         pd.Series
             Risk appetite values
         """
+        # Validate inputs to prevent division by zero
+        if tolerance == 0:
+            logger.warning("tolerance is 0, using default -0.1")
+            tolerance = -0.1
+        if mn <= 0:
+            logger.warning(f"mn must be positive, got {mn}, using 0.01")
+            mn = 0.01
+        if mx <= 0:
+            logger.warning(f"mx must be positive, got {mx}, using 0.01")
+            mx = 0.01
+
         # Drawdown rebased
         eqty = pd.Series(eqty)
         watermark = eqty.expanding().max()  # all-time-high peak equity
+
+        # Guard against zero watermark (would cause division by zero)
+        watermark = watermark.replace(0, np.nan).ffill().fillna(1)
+
         drawdown = eqty / watermark - 1  # drawdown from peak
         ddr = 1 - np.minimum(drawdown / tolerance, 1)  # drawdown rebased to tolerance from 0 to 1
         avg_ddr = ddr.ewm(span=span).mean()  # span rebased drawdown
-        
-        # Shape of the curve
+
+        # Shape of the curve - with safe division
         if shape == 1:
             _power = mx / mn  # convex
         elif shape == -1:
@@ -93,10 +195,10 @@ class PositionSizing:
         else:
             _power = 1  # raw, straight line
         ddr_power = avg_ddr ** _power  # ddr
-        
+
         # mn + adjusted delta
         risk_appetite = mn + (mx - mn) * ddr_power
-        
+
         return risk_appetite
     
     def _get_column_names(self, prefix):
@@ -131,36 +233,7 @@ class PositionSizing:
             'ccv': f'{base}_risk_concave',
             'cvx': f'{base}_risk_convex'
         }
-    
-    # def _get_column_names(self, prefix):
-    #     """
-    #     Generate prefixed column names for strategies and outputs.
-        
-    #     Parameters:
-    #     -----------
-    #     prefix : str
-    #         Prefix to add to column names (typically the signal name)
-            
-    #     Returns:
-    #     --------
-    #     dict
-    #         Dictionary containing all column name mappings
-    #     """
-    #     return {
-    #         'strategies': [f'{prefix}_equal_weight', f'{prefix}_constant', 
-    #                       f'{prefix}_concave', f'{prefix}_convex'],
-    #         # 'strategies': [f'{prefix}_equity_equal_weight', f'{prefix}_equity_constant', 
-    #         #               f'{prefix}_equity_concave', f'{prefix}_equity_convex'],
-    #         'share_cols': [f'{prefix}_shs_eql', f'{prefix}_shs_fxd', 
-    #                       f'{prefix}_shs_ccv', f'{prefix}_shs_cvx'],
-    #         'risk_configs': [
-    #             {'col': f'{prefix}_concave', 'shape': -1, 'store': f'{prefix}_ccv'},
-    #             {'col': f'{prefix}_convex', 'shape': 1, 'store': f'{prefix}_cvx'}
-    #         ],
-    #         'ccv': f'{prefix}_ccv',
-    #         'cvx': f'{prefix}_cvx'
-    #     }
-    
+
     def _initialize_columns(self, df, cols):
         """
         Initialize required columns in the DataFrame.
@@ -265,14 +338,14 @@ class PositionSizing:
         dict or None
             Dictionary with updated share values, or None if no recalculation needed
         """
-        # if not ((df.at[i-1, signal] == 0) and (df.at[i, signal] != 0)):
-        #     return None
-        if df.at[i, signal] == df.at[i-1, signal]: return None
-        
+        if df.at[i, signal] == df.at[i-1, signal]:
+            return None
+
         px = df.at[i, close]
         sl_price = df.at[i, sl]
-        
-        if px == sl_price:
+
+        # Use tolerance comparison instead of exact float equality
+        if abs(px - sl_price) < 1e-10:
             return None
         
         fx = 1
@@ -282,12 +355,6 @@ class PositionSizing:
                    (px * self.lot)) * self.lot
         
         # Calculate risk-based shares
-        # share_configs = [
-        #     {'strategy': cols['strategies'][1], 'risk': self.avg, 'key': cols['share_cols'][1]},
-        #     {'strategy': cols['strategies'][2], 'risk': risk_values[cols['ccv']], 'key': cols['share_cols'][2]},
-        #     {'strategy': cols['strategies'][3], 'risk': risk_values[cols['cvx']], 'key': cols['share_cols'][3]}
-        # ]
-
         share_configs = [
             {'strategy': cols['strategies'][1], 'risk': self.avg,     'key': cols['share_cols'][1]},
             {'strategy': cols['strategies'][2], 'risk': risk_values[cols['ccv']], 'key': cols['share_cols'][2]},
@@ -503,7 +570,7 @@ def run_position_sizing_parallel(
         for task in tasks
     )
 
-# Merge results safely
+    # Merge results safely
     result_df = df.copy()
 
     for processed_df in results:
