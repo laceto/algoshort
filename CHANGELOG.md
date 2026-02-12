@@ -137,6 +137,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Parameter validation tests (negative/zero window values)
   - Memory leak prevention verification
   - Already-indexed DataFrame handling
+- **DONE** - `notebooks/plots_guide.ipynb` - Plotting module user guide:
+  - Setup and installation instructions
+  - Understanding the plots module (function overview, signatures)
+  - Data preparation with all required columns
+  - Price comparison plots (absolute vs relative)
+  - Signal visualization (breakout, turtle, MA, floor/ceiling)
+  - Regime detection plots
+  - Performance & P&L plots
+  - Position sizing visualization
+  - Customization and integration examples
+  - Best practices and troubleshooting guide
 - **DONE** - `tests/test_optimizer.py` - Comprehensive tests for StrategyOptimizer:
   - Initialization and validation tests
   - Grid search tests (empty grid, large grid, combination limits)
