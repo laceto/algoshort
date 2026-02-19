@@ -195,11 +195,15 @@ class YFinanceDataHandler:
         """
         
         try:
-            required_cols = ['open', 'high', 'low', 'close']
+            required_cols = ['open', 'high', 'low', 'close', 'volume']
             data = self.get_data(symbol, required_cols)
-            
+
             if data.empty:
                 raise ValueError(f"No OHLC data available for {symbol}")
+
+            missing = [col for col in required_cols if col not in data.columns]
+            if missing:
+                raise ValueError(f"Missing required columns for {symbol}: {missing}")
             
             # Reset index to get date column
             data = data.reset_index()
@@ -221,61 +225,66 @@ class YFinanceDataHandler:
             raise
 
     def get_combined_data(self, symbols: List[str], columns: Union[str, List[str], None] = None) -> pd.DataFrame:
-            """
-            Get data for multiple symbols in row-bound format (long format).
-            
-            This method will NOT download missing data; it only works with symbols
-            that have already been loaded into memory.
+        """
+        Get data for multiple symbols in row-bound format (long format).
 
-            Args:
-                symbols (List[str]): List of symbols
-                columns (Union[str, List[str], None]): Specific column(s) to extract.
-                                                    If None, returns the entire DataFrame.
+        Uses get_ohlc_data internally, so each row always contains open, high, low,
+        close, and volume columns (unless filtered via the columns parameter).
 
-            Returns:
-                pd.DataFrame: DataFrame with a 'symbol' column and the requested data.
-                            Returns an empty DataFrame if no data is available.
-            """
-            combined_rows = []
+        This method will NOT download missing data; it only works with symbols
+        that have already been loaded into memory.
 
-            if isinstance(columns, str):
-                columns = [columns]
+        Args:
+            symbols (List[str]): List of symbols
+            columns (Union[str, List[str], None]): Specific column(s) to extract from
+                                                the OHLC+volume data. If None, returns
+                                                all OHLC and volume columns.
 
-            for symbol in symbols:
-                # Check if the symbol is in memory before proceeding
-                if symbol not in self.data:
-                    self.logger.warning(f"Skipping '{symbol}': data not found in memory.")
-                    continue
+        Returns:
+            pd.DataFrame: DataFrame with a 'symbol' column and the requested data.
+                        Returns an empty DataFrame if no data is available.
+        """
+        combined_rows = []
 
-                try:
-                    data = self.get_data(symbol, columns)
-                    if not data.empty:
-                        symbol_data = data.copy().reset_index()
-                        symbol_data.columns = symbol_data.columns.str.lower()  # Standardize to lowercase
-                        symbol_data['symbol'] = symbol
+        if isinstance(columns, str):
+            columns = [columns]
 
-                        # Ensure 'date' column is present before reordering
-                        if 'date' in symbol_data.columns:
-                            cols = ['date', 'symbol'] + [col for col in symbol_data.columns if col not in ['date', 'symbol']]
-                            symbol_data = symbol_data[cols]
-                        else:
-                            self.logger.warning(f"Skipping {symbol} due to missing 'date' column.")
+        for symbol in symbols:
+            # Check if the symbol is in memory before proceeding
+            if symbol not in self.data:
+                self.logger.warning(f"Skipping '{symbol}': data not found in memory.")
+                continue
+
+            try:
+                data = self.get_ohlc_data(symbol)
+                if not data.empty:
+                    symbol_data = data.copy().reset_index()  # date index becomes a column
+                    symbol_data['symbol'] = symbol
+
+                    if columns:
+                        available_cols = [col for col in columns if col in symbol_data.columns]
+                        if not available_cols:
+                            self.logger.warning(f"None of {columns} found in {symbol} data, skipping.")
                             continue
-
-                        combined_rows.append(symbol_data)
+                        symbol_data = symbol_data[['date', 'symbol'] + available_cols]
                     else:
-                        self.logger.warning(f"No data available for {symbol}")
+                        cols = ['date', 'symbol'] + [col for col in symbol_data.columns if col not in ['date', 'symbol']]
+                        symbol_data = symbol_data[cols]
 
-                except Exception as e:
-                    self.logger.error(f"Error processing {symbol}: {e}")
-                    continue
+                    combined_rows.append(symbol_data)
+                else:
+                    self.logger.warning(f"No data available for {symbol}")
 
-            if combined_rows:
-                result = pd.concat(combined_rows, ignore_index=True)
-                return result.sort_values(['date', 'symbol']).reset_index(drop=True)
-            else:
-                # Return an empty DataFrame with a consistent schema
-                return pd.DataFrame(columns=['date', 'symbol'])
+            except Exception as e:
+                self.logger.error(f"Error processing {symbol}: {e}")
+                continue
+
+        if combined_rows:
+            result = pd.concat(combined_rows, ignore_index=True)
+            return result.sort_values(['date', 'symbol']).reset_index(drop=True)
+        else:
+            # Return an empty DataFrame with a consistent schema
+            return pd.DataFrame(columns=['date', 'symbol'])
 
     def get_multiple_symbols_data(self, symbols: List[str], column: str = 'close') -> pd.DataFrame:
         """

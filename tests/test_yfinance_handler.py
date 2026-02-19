@@ -285,10 +285,27 @@ class TestGetOHLCData:
         assert data.index.name == 'date'
 
     def test_get_ohlc_data_has_required_columns(self, handler_with_data):
-        """Test that OHLC columns are present."""
+        """Test that OHLC and volume columns are present."""
         data = handler_with_data.get_ohlc_data("AAPL")
-        for col in ['open', 'high', 'low', 'close']:
+        for col in ['open', 'high', 'low', 'close', 'volume']:
             assert col in data.columns
+
+    def test_get_ohlc_data_has_volume_column(self, handler_with_data):
+        """Test that volume is included in get_ohlc_data output."""
+        data = handler_with_data.get_ohlc_data("AAPL")
+        assert 'volume' in data.columns
+        assert data['volume'].iloc[0] == 1000000
+
+    def test_get_ohlc_data_missing_volume_raises(self):
+        """Test that missing volume column raises ValueError."""
+        handler = YFinanceDataHandler(enable_logging=False)
+        handler.data["AAPL"] = pd.DataFrame({
+            'open': [100.0], 'high': [105.0], 'low': [99.0], 'close': [104.0]
+            # no 'volume'
+        }, index=pd.date_range('2024-01-01', periods=1, name='Date'))
+        handler.symbols.append("AAPL")
+        with pytest.raises(ValueError):
+            handler.get_ohlc_data("AAPL")
 
     def test_get_ohlc_data_missing_symbol_raises(self, handler_with_data):
         """Test that missing symbol raises KeyError."""
@@ -301,28 +318,50 @@ class TestGetCombinedData:
 
     @pytest.fixture
     def handler_with_multiple(self):
-        """Create handler with multiple symbols."""
+        """Create handler with multiple symbols (full OHLCV required by get_ohlc_data)."""
         handler = YFinanceDataHandler(enable_logging=False)
 
-        dates = pd.date_range('2024-01-01', periods=3)
+        dates = pd.date_range('2024-01-01', periods=3, name='Date')
 
         handler.data["AAPL"] = pd.DataFrame({
+            'open': [99.0, 100.0, 101.0],
+            'high': [105.0, 106.0, 107.0],
+            'low': [98.0, 99.0, 100.0],
             'close': [100.0, 101.0, 102.0],
+            'volume': [1000000, 1100000, 1200000],
         }, index=dates)
 
         handler.data["MSFT"] = pd.DataFrame({
+            'open': [199.0, 200.0, 201.0],
+            'high': [205.0, 206.0, 207.0],
+            'low': [198.0, 199.0, 200.0],
             'close': [200.0, 201.0, 202.0],
+            'volume': [2000000, 2100000, 2200000],
         }, index=dates)
 
         handler.symbols.extend(["AAPL", "MSFT"])
         return handler
 
     def test_get_combined_data_long_format(self, handler_with_multiple):
-        """Test that combined data is in long format."""
+        """Test that combined data is in long format with date and symbol columns."""
         data = handler_with_multiple.get_combined_data(["AAPL", "MSFT"], columns=['close'])
         assert 'symbol' in data.columns
         assert 'date' in data.columns
         assert len(data) == 6  # 3 rows per symbol
+
+    def test_get_combined_data_includes_ohlcv_by_default(self, handler_with_multiple):
+        """Test that all OHLC and volume columns are returned when no filter is given."""
+        data = handler_with_multiple.get_combined_data(["AAPL"])
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            assert col in data.columns
+
+    def test_get_combined_data_column_filter(self, handler_with_multiple):
+        """Test that column filter restricts output to requested columns."""
+        data = handler_with_multiple.get_combined_data(["AAPL", "MSFT"], columns=['close', 'volume'])
+        assert 'close' in data.columns
+        assert 'volume' in data.columns
+        assert 'open' not in data.columns
+        assert len(data) == 6
 
     def test_get_combined_data_missing_symbol_skipped(self, handler_with_multiple):
         """Test that missing symbols are skipped with warning."""
@@ -336,6 +375,15 @@ class TestGetCombinedData:
         assert 'date' in data.columns
         assert 'symbol' in data.columns
         assert len(data) == 0
+
+    def test_get_combined_data_uses_get_ohlc_data(self, handler_with_multiple):
+        """Test that get_combined_data delegates to get_ohlc_data."""
+        with patch.object(handler_with_multiple, 'get_ohlc_data', wraps=handler_with_multiple.get_ohlc_data) as mock_ohlc:
+            handler_with_multiple.get_combined_data(["AAPL", "MSFT"])
+            assert mock_ohlc.call_count == 2
+            calls = [call.args[0] for call in mock_ohlc.call_args_list]
+            assert "AAPL" in calls
+            assert "MSFT" in calls
 
 
 class TestGetMultipleSymbolsData:
