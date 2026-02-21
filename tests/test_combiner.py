@@ -12,7 +12,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from algoshort.combiner import HybridSignalCombiner, SignalGridSearch
+from algoshort.combiner import (
+    HybridSignalCombiner,
+    SignalGridSearch,
+    _process_stock_all_combinations,
+)
 
 
 # =============================================================================
@@ -940,6 +944,262 @@ class TestIntegration:
         # Should have added new columns
         new_cols = len(searcher.df.columns)
         assert new_cols > original_cols
+
+
+# =============================================================================
+# Fixtures for parallel-over-stocks tests
+# =============================================================================
+
+@pytest.fixture
+def multi_stock_dfs():
+    """Create a dict of 3 stock DataFrames sharing the same signal schema."""
+    n = 200
+
+    def make_df(seed):
+        np.random.seed(seed)
+        return pd.DataFrame({
+            'date': pd.date_range('2024-01-01', periods=n, freq='B'),
+            'close': 100 + np.cumsum(np.random.randn(n) * 2),
+            'rrg': np.where(np.arange(n) % 30 < 15, 1, -1),
+            'rbo_20': np.where(np.arange(n) % 10 == 0, 1,
+                               np.where(np.arange(n) % 12 == 0, -1, 0)),
+            'rtt_5020': np.where(np.arange(n) % 15 == 0, 1,
+                                 np.where(np.arange(n) % 18 == 0, -1, 0)),
+        })
+
+    return {
+        'ENI.MI':  make_df(42),
+        'ENEL.MI': make_df(7),
+        'ISP.MI':  make_df(13),
+    }
+
+
+# =============================================================================
+# _process_stock_all_combinations Tests
+# =============================================================================
+
+class TestProcessStockAllCombinations:
+    """Tests for the module-level worker function."""
+
+    def test_returns_ticker_and_list(self, multi_stock_dfs):
+        """Test that the worker returns (ticker, list_of_dicts)."""
+        ticker = 'ENI.MI'
+        df = multi_stock_dfs[ticker]
+        searcher = SignalGridSearch(
+            df=df.copy(),
+            available_signals=['rbo_20', 'rtt_5020'],
+            direction_col='rrg',
+        )
+        grid = searcher.generate_grid()
+
+        result_ticker, results = _process_stock_all_combinations(
+            (ticker, df, grid, 'rrg', True, True, False)
+        )
+
+        assert result_ticker == ticker
+        assert isinstance(results, list)
+        assert len(results) == len(grid)
+
+    def test_each_result_tagged_with_ticker(self, multi_stock_dfs):
+        """Test that every result dict carries the correct 'ticker' key."""
+        ticker = 'ENEL.MI'
+        df = multi_stock_dfs[ticker]
+        searcher = SignalGridSearch(
+            df=df.copy(),
+            available_signals=['rbo_20', 'rtt_5020'],
+            direction_col='rrg',
+        )
+        grid = searcher.generate_grid()
+
+        _, results = _process_stock_all_combinations(
+            (ticker, df, grid, 'rrg', True, True, False)
+        )
+
+        for result in results:
+            assert result['ticker'] == ticker
+
+    def test_result_schema_matches_single_combination(self, multi_stock_dfs):
+        """Test that each result dict has the same keys as _process_single_combination."""
+        ticker = 'ISP.MI'
+        df = multi_stock_dfs[ticker]
+        searcher = SignalGridSearch(
+            df=df.copy(),
+            available_signals=['rbo_20', 'rtt_5020'],
+            direction_col='rrg',
+        )
+        grid = searcher.generate_grid()
+
+        _, results = _process_stock_all_combinations(
+            (ticker, df, grid, 'rrg', True, True, False)
+        )
+
+        expected_keys = {
+            'combination_name', 'entry_signal', 'exit_signal', 'direction_signal',
+            'output_column', 'total_trades', 'long_trades', 'short_trades',
+            'success', 'ticker', 'combined_signal',
+        }
+        for result in results:
+            assert expected_keys.issubset(result.keys())
+
+
+# =============================================================================
+# run_grid_search_parallel_over_stocks Tests
+# =============================================================================
+
+class TestRunGridSearchParallelOverStocks:
+    """Tests for SignalGridSearch.run_grid_search_parallel_over_stocks."""
+
+    def _make_searcher(self, multi_stock_dfs):
+        return SignalGridSearch(
+            df=multi_stock_dfs['ENI.MI'].copy(),
+            available_signals=['rbo_20', 'rtt_5020'],
+            direction_col='rrg',
+        )
+
+    def test_returns_dict(self, multi_stock_dfs):
+        """Test that the method returns a dict."""
+        searcher = self._make_searcher(multi_stock_dfs)
+        results = searcher.run_grid_search_parallel_over_stocks(
+            stock_dfs=multi_stock_dfs, n_jobs=1
+        )
+        assert isinstance(results, dict)
+
+    def test_keys_match_tickers(self, multi_stock_dfs):
+        """Test that result keys match input tickers exactly."""
+        searcher = self._make_searcher(multi_stock_dfs)
+        results = searcher.run_grid_search_parallel_over_stocks(
+            stock_dfs=multi_stock_dfs, n_jobs=1
+        )
+        assert set(results.keys()) == set(multi_stock_dfs.keys())
+
+    def test_each_value_is_dataframe(self, multi_stock_dfs):
+        """Test that each dict value is a pd.DataFrame."""
+        searcher = self._make_searcher(multi_stock_dfs)
+        results = searcher.run_grid_search_parallel_over_stocks(
+            stock_dfs=multi_stock_dfs, n_jobs=1
+        )
+        for ticker, df in results.items():
+            assert isinstance(df, pd.DataFrame), f"Expected DataFrame for {ticker}"
+
+    def test_rows_per_stock_equal_combo_count(self, multi_stock_dfs):
+        """Test that each result DataFrame has one row per signal combination."""
+        signals = ['rbo_20', 'rtt_5020']
+        n_combos = len(signals) ** 2  # 4
+
+        searcher = SignalGridSearch(
+            df=multi_stock_dfs['ENI.MI'].copy(),
+            available_signals=signals,
+            direction_col='rrg',
+        )
+        results = searcher.run_grid_search_parallel_over_stocks(
+            stock_dfs=multi_stock_dfs, n_jobs=1
+        )
+
+        for ticker, df in results.items():
+            assert len(df) == n_combos, f"{ticker}: expected {n_combos} rows, got {len(df)}"
+
+    def test_ticker_column_present_and_correct(self, multi_stock_dfs):
+        """Test that each result DataFrame has a 'ticker' column with the right value."""
+        searcher = self._make_searcher(multi_stock_dfs)
+        results = searcher.run_grid_search_parallel_over_stocks(
+            stock_dfs=multi_stock_dfs, n_jobs=1
+        )
+        for ticker, df in results.items():
+            assert 'ticker' in df.columns
+            assert (df['ticker'] == ticker).all()
+
+    def test_result_columns_match_schema(self, multi_stock_dfs):
+        """Test that result DataFrames contain the expected schema columns."""
+        expected_cols = {
+            'combination_name', 'entry_signal', 'exit_signal',
+            'total_trades', 'success', 'ticker',
+        }
+        searcher = self._make_searcher(multi_stock_dfs)
+        results = searcher.run_grid_search_parallel_over_stocks(
+            stock_dfs=multi_stock_dfs, n_jobs=1
+        )
+        for ticker, df in results.items():
+            missing = expected_cols - set(df.columns)
+            assert not missing, f"{ticker} missing columns: {missing}"
+
+    def test_all_combinations_succeed(self, multi_stock_dfs):
+        """Test that all combinations succeed for valid input."""
+        searcher = self._make_searcher(multi_stock_dfs)
+        results = searcher.run_grid_search_parallel_over_stocks(
+            stock_dfs=multi_stock_dfs, n_jobs=1
+        )
+        for ticker, df in results.items():
+            assert df['success'].all(), f"{ticker} has failed combinations"
+
+    def test_no_combined_signal_column_in_results(self, multi_stock_dfs):
+        """Test that combined_signal is stripped from result DataFrames."""
+        searcher = self._make_searcher(multi_stock_dfs)
+        results = searcher.run_grid_search_parallel_over_stocks(
+            stock_dfs=multi_stock_dfs, n_jobs=1
+        )
+        for ticker, df in results.items():
+            assert 'combined_signal' not in df.columns
+
+    def test_empty_stock_dfs_raises(self, multi_stock_dfs):
+        """Test that empty stock_dfs raises ValueError."""
+        searcher = self._make_searcher(multi_stock_dfs)
+        with pytest.raises(ValueError, match="empty"):
+            searcher.run_grid_search_parallel_over_stocks(stock_dfs={}, n_jobs=1)
+
+    def test_invalid_n_jobs_raises(self, multi_stock_dfs):
+        """Test that n_jobs=0 raises ValueError."""
+        searcher = self._make_searcher(multi_stock_dfs)
+        with pytest.raises(ValueError, match="n_jobs"):
+            searcher.run_grid_search_parallel_over_stocks(
+                stock_dfs=multi_stock_dfs, n_jobs=0
+            )
+
+    def test_add_signals_to_dfs_writes_columns(self, multi_stock_dfs):
+        """Test that add_signals_to_dfs=True adds combined columns to input dfs."""
+        signals = ['rbo_20', 'rtt_5020']
+        n_combos = len(signals) ** 2  # 4
+
+        searcher = SignalGridSearch(
+            df=multi_stock_dfs['ENI.MI'].copy(),
+            available_signals=signals,
+            direction_col='rrg',
+        )
+        original_col_counts = {t: len(df.columns) for t, df in multi_stock_dfs.items()}
+
+        searcher.run_grid_search_parallel_over_stocks(
+            stock_dfs=multi_stock_dfs, n_jobs=1, add_signals_to_dfs=True
+        )
+
+        for ticker, df in multi_stock_dfs.items():
+            added = len(df.columns) - original_col_counts[ticker]
+            assert added == n_combos, f"{ticker}: expected {n_combos} new cols, got {added}"
+
+    def test_no_side_effects_by_default(self, multi_stock_dfs):
+        """Test that input dfs are not modified when add_signals_to_dfs=False."""
+        searcher = self._make_searcher(multi_stock_dfs)
+        original_col_counts = {t: len(df.columns) for t, df in multi_stock_dfs.items()}
+
+        searcher.run_grid_search_parallel_over_stocks(
+            stock_dfs=multi_stock_dfs, n_jobs=1, add_signals_to_dfs=False
+        )
+
+        for ticker, df in multi_stock_dfs.items():
+            assert len(df.columns) == original_col_counts[ticker], (
+                f"{ticker}: columns were unexpectedly added to input df"
+            )
+
+    def test_single_stock_runs_sequentially(self, multi_stock_dfs):
+        """Test that a single-stock dict uses the sequential path (n_jobs caps to 1)."""
+        single_stock = {'ENI.MI': multi_stock_dfs['ENI.MI']}
+        searcher = self._make_searcher(multi_stock_dfs)
+
+        # n_jobs=-1 but only 1 stock: effective_jobs clamps to 1, no Pool spawned
+        results = searcher.run_grid_search_parallel_over_stocks(
+            stock_dfs=single_stock, n_jobs=-1
+        )
+
+        assert set(results.keys()) == {'ENI.MI'}
+        assert isinstance(results['ENI.MI'], pd.DataFrame)
 
 
 if __name__ == '__main__':
