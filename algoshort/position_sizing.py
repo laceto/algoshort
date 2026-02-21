@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 from typing import List
 from joblib import Parallel, delayed
+from multiprocessing import Pool, cpu_count
+from tqdm import tqdm
 import logging
 
 logger = logging.getLogger(__name__)
@@ -582,3 +584,166 @@ def run_position_sizing_parallel(
     logger.info(f"Completed — added columns for {len(results)} signals")
 
     return result_df
+
+
+def _process_stock_position_sizing(args):
+    """
+    Worker function: process all signals serially for a single stock.
+    Must be at module level for multiprocessing pickling compatibility.
+
+    Parameters
+    ----------
+    args : tuple
+        Packed as (ticker, df, signals, sizer, chg_suffix, sl_suffix, close_col)
+
+    Returns
+    -------
+    tuple[str, pd.DataFrame]
+        (ticker, result_df with all position-sizing columns added)
+    """
+    ticker, df, signals, sizer, chg_suffix, sl_suffix, close_col = args
+
+    result_df = df.copy()
+
+    for signal in signals:
+        cols = get_signal_column_names(signal, chg_suffix, sl_suffix, close_col)
+
+        required_cols = [cols["signal"], cols["daily_chg"], cols["sl"], cols["close"]]
+        missing = [c for c in required_cols if c not in result_df.columns]
+        if missing:
+            logger.warning(f"[{ticker}] Skipping '{signal}': missing columns {missing}")
+            continue
+
+        try:
+            processed = sizer.calculate_shares_for_signal(
+                df=result_df,
+                signal=cols["signal"],
+                daily_chg=cols["daily_chg"],
+                sl=cols["sl"],
+                close=cols["close"],
+            )
+            new_cols = [c for c in processed.columns if c not in result_df.columns]
+            if new_cols:
+                result_df[new_cols] = processed[new_cols]
+        except Exception as e:
+            logger.error(f"[{ticker}] Error processing signal '{signal}': {e}")
+
+    return ticker, result_df
+
+
+def run_position_sizing_parallel_over_stocks(
+    sizer: PositionSizing,
+    stock_dfs: dict,
+    signals: List[str],
+    chg_suffix: str = "_chg1D_fx",
+    sl_suffix: str = "_stop_loss",
+    close_col: str = "close",
+    n_jobs: int = -1,
+) -> dict:
+    """
+    Run position sizing for all signals on each stock in parallel.
+
+    Inverts the parallelism axis of run_position_sizing_parallel: workers are
+    distributed over stocks rather than signals. Each worker receives only one
+    stock's DataFrame, giving dramatically lower per-worker memory usage when
+    scanning a large ticker universe.
+
+    Avoids nested parallelism: signals are processed serially inside each
+    worker, so no joblib/Pool nesting occurs.
+
+    Parameters
+    ----------
+    sizer : PositionSizing
+        Configured PositionSizing instance. Picklable by default (all primitive
+        attributes).
+    stock_dfs : dict[str, pd.DataFrame]
+        {ticker: ohlc_with_signals_df}. Each DataFrame must contain the signal,
+        daily_chg, stop_loss, and close columns for every requested signal.
+    signals : list[str]
+        Signal column names to process for each stock.
+    chg_suffix : str, default='_chg1D_fx'
+        Suffix appended to each signal name to form the daily-change column.
+    sl_suffix : str, default='_stop_loss'
+        Suffix appended to each signal name to form the stop-loss column.
+    close_col : str, default='close'
+        Name of the close price column.
+    n_jobs : int, default=-1
+        Number of parallel worker processes.
+        -1 uses all available CPU cores, capped at len(stock_dfs).
+        1 runs sequentially without spawning a Pool.
+
+    Returns
+    -------
+    dict[str, pd.DataFrame]
+        {ticker: result_df} where each result_df is the stock's DataFrame with
+        all position-sizing equity/shares/risk columns added.
+
+    Raises
+    ------
+    ValueError
+        If stock_dfs is empty, signals is empty, or n_jobs is invalid.
+
+    Performance Notes
+    -----------------
+    - Per-worker memory: O(one_stock_df) vs O(full_multi_stock_df).
+    - Best when: many stocks, moderate number of signals.
+    - If you have very few stocks but many signals, prefer
+      run_position_sizing_parallel instead.
+
+    Examples
+    --------
+    sizer = PositionSizing(
+        tolerance=-0.1, mn=0.005, mx=0.02,
+        equal_weight=0.1, avg=0.01, lot=1
+    )
+    stock_dfs = {'ENI.MI': df_eni, 'ENEL.MI': df_enel}
+    results = run_position_sizing_parallel_over_stocks(
+        sizer=sizer,
+        stock_dfs=stock_dfs,
+        signals=['rbo_20__rbo_20', 'rtt_5020__rtt_5020'],
+    )
+    df_eni_sized = results['ENI.MI']
+    """
+    if not stock_dfs:
+        raise ValueError("stock_dfs is empty -- provide at least one stock DataFrame.")
+    if not signals:
+        raise ValueError("signals is empty -- provide at least one signal.")
+    if n_jobs == -1:
+        n_jobs = cpu_count()
+    elif n_jobs < 1:
+        raise ValueError(f"n_jobs must be -1 or a positive integer, got {n_jobs}.")
+
+    n_stocks = len(stock_dfs)
+    # Cap workers at stock count -- no benefit spawning more workers than tasks
+    effective_jobs = min(n_jobs, n_stocks)
+
+    logger.info(
+        f"Position sizing: {n_stocks} stocks x {len(signals)} signals "
+        f"({effective_jobs} workers)"
+    )
+
+    stock_results: dict = {}
+
+    if effective_jobs == 1:
+        # Sequential path -- avoids Pool overhead and nested parallelism.
+        for ticker, df in tqdm(stock_dfs.items(), desc="Stocks processed", total=n_stocks):
+            _, result_df = _process_stock_position_sizing(
+                (ticker, df, signals, sizer, chg_suffix, sl_suffix, close_col)
+            )
+            stock_results[ticker] = result_df
+    else:
+        # Pack into single-arg tuples required for pool.imap pickling
+        worker_args = [
+            (ticker, df, signals, sizer, chg_suffix, sl_suffix, close_col)
+            for ticker, df in stock_dfs.items()
+        ]
+        with Pool(processes=effective_jobs) as pool:
+            for ticker, result_df in tqdm(
+                pool.imap_unordered(_process_stock_position_sizing, worker_args),
+                total=n_stocks,
+                desc="Stocks processed",
+            ):
+                stock_results[ticker] = result_df
+
+    logger.info(f"Completed position sizing for {n_stocks} stocks")
+    return stock_results

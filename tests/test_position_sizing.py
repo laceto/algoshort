@@ -11,7 +11,12 @@ Covers:
 import pytest
 import pandas as pd
 import numpy as np
-from algoshort.position_sizing import PositionSizing, get_signal_column_names
+from algoshort.position_sizing import (
+    PositionSizing,
+    get_signal_column_names,
+    _process_stock_position_sizing,
+    run_position_sizing_parallel_over_stocks,
+)
 
 
 class TestPositionSizingConstructor:
@@ -468,3 +473,247 @@ class TestCalculateSharesEdgeCases:
             close='close'
         )
         assert result is not None
+
+
+# =============================================================================
+# Fixtures for parallel-over-stocks tests
+# =============================================================================
+
+@pytest.fixture
+def base_sizer():
+    """Standard PositionSizing instance used across stock-parallel tests."""
+    return PositionSizing(
+        tolerance=-0.1,
+        mn=0.01,
+        mx=0.05,
+        equal_weight=0.1,
+        avg=0.02,
+        lot=100,
+        initial_capital=100000,
+    )
+
+
+@pytest.fixture
+def multi_stock_dfs():
+    """Dict of 3 stock DataFrames sharing the same column schema."""
+    n = 30
+
+    def make_df(seed):
+        np.random.seed(seed)
+        close = 100 + np.cumsum(np.random.randn(n))
+        return pd.DataFrame({
+            'close':            close,
+            'stop_loss':        close - 5 + np.random.randn(n) * 0.5,
+            'chg1D_fx':         np.random.randn(n) * 0.5,
+            # signal column (used as prefix)
+            'sig_a':            np.where(np.arange(n) % 5 == 1, 1,
+                                 np.where(np.arange(n) % 7 == 0, -1, 0)),
+            # per-signal derived columns
+            'sig_a_chg1D_fx':   np.random.randn(n) * 0.5,
+            'sig_a_stop_loss':  close - 5 + np.random.randn(n) * 0.2,
+            'sig_b':            np.where(np.arange(n) % 4 == 1, 1,
+                                 np.where(np.arange(n) % 6 == 0, -1, 0)),
+            'sig_b_chg1D_fx':   np.random.randn(n) * 0.5,
+            'sig_b_stop_loss':  close - 4 + np.random.randn(n) * 0.2,
+        })
+
+    return {
+        'ENI.MI':  make_df(42),
+        'ENEL.MI': make_df(7),
+        'ISP.MI':  make_df(13),
+    }
+
+
+# =============================================================================
+# _process_stock_position_sizing Tests
+# =============================================================================
+
+class TestProcessStockPositionSizing:
+    """Tests for the module-level worker function."""
+
+    def test_returns_ticker_and_dataframe(self, base_sizer, multi_stock_dfs):
+        """Test that the worker returns (ticker, pd.DataFrame)."""
+        ticker = 'ENI.MI'
+        df = multi_stock_dfs[ticker]
+
+        result_ticker, result_df = _process_stock_position_sizing(
+            (ticker, df, ['sig_a', 'sig_b'], base_sizer,
+             '_chg1D_fx', '_stop_loss', 'close')
+        )
+
+        assert result_ticker == ticker
+        assert isinstance(result_df, pd.DataFrame)
+
+    def test_adds_equity_columns(self, base_sizer, multi_stock_dfs):
+        """Test that equity columns are added to the result DataFrame."""
+        ticker = 'ENI.MI'
+        df = multi_stock_dfs[ticker]
+
+        _, result_df = _process_stock_position_sizing(
+            (ticker, df, ['sig_a'], base_sizer,
+             '_chg1D_fx', '_stop_loss', 'close')
+        )
+
+        assert 'sig_a_equity_equal' in result_df.columns
+        assert 'sig_a_equity_constant' in result_df.columns
+        assert 'sig_a_equity_concave' in result_df.columns
+        assert 'sig_a_equity_convex' in result_df.columns
+
+    def test_original_df_not_modified(self, base_sizer, multi_stock_dfs):
+        """Test that the input DataFrame is not mutated."""
+        ticker = 'ENEL.MI'
+        df = multi_stock_dfs[ticker]
+        original_cols = set(df.columns)
+
+        _process_stock_position_sizing(
+            (ticker, df, ['sig_a'], base_sizer,
+             '_chg1D_fx', '_stop_loss', 'close')
+        )
+
+        assert set(df.columns) == original_cols
+
+    def test_missing_signal_columns_skipped(self, base_sizer, multi_stock_dfs):
+        """Test that signals with missing columns are skipped gracefully."""
+        ticker = 'ENI.MI'
+        df = multi_stock_dfs[ticker]
+
+        # 'nonexistent' has no derived columns in df — should be skipped
+        _, result_df = _process_stock_position_sizing(
+            (ticker, df, ['nonexistent', 'sig_a'], base_sizer,
+             '_chg1D_fx', '_stop_loss', 'close')
+        )
+
+        # sig_a should still be processed
+        assert 'sig_a_equity_equal' in result_df.columns
+        # nonexistent should produce no columns
+        assert 'nonexistent_equity_equal' not in result_df.columns
+
+    def test_multiple_signals_processed(self, base_sizer, multi_stock_dfs):
+        """Test that all signals are processed serially."""
+        ticker = 'ISP.MI'
+        df = multi_stock_dfs[ticker]
+
+        _, result_df = _process_stock_position_sizing(
+            (ticker, df, ['sig_a', 'sig_b'], base_sizer,
+             '_chg1D_fx', '_stop_loss', 'close')
+        )
+
+        assert 'sig_a_equity_equal' in result_df.columns
+        assert 'sig_b_equity_equal' in result_df.columns
+
+
+# =============================================================================
+# run_position_sizing_parallel_over_stocks Tests
+# =============================================================================
+
+class TestRunPositionSizingParallelOverStocks:
+    """Tests for run_position_sizing_parallel_over_stocks."""
+
+    def test_returns_dict(self, base_sizer, multi_stock_dfs):
+        """Test that the function returns a dict."""
+        result = run_position_sizing_parallel_over_stocks(
+            sizer=base_sizer,
+            stock_dfs=multi_stock_dfs,
+            signals=['sig_a', 'sig_b'],
+            n_jobs=1,
+        )
+        assert isinstance(result, dict)
+
+    def test_keys_match_tickers(self, base_sizer, multi_stock_dfs):
+        """Test that result keys match input tickers."""
+        result = run_position_sizing_parallel_over_stocks(
+            sizer=base_sizer,
+            stock_dfs=multi_stock_dfs,
+            signals=['sig_a'],
+            n_jobs=1,
+        )
+        assert set(result.keys()) == set(multi_stock_dfs.keys())
+
+    def test_each_value_is_dataframe(self, base_sizer, multi_stock_dfs):
+        """Test that each value is a pd.DataFrame."""
+        result = run_position_sizing_parallel_over_stocks(
+            sizer=base_sizer,
+            stock_dfs=multi_stock_dfs,
+            signals=['sig_a'],
+            n_jobs=1,
+        )
+        for ticker, df in result.items():
+            assert isinstance(df, pd.DataFrame), f"Expected DataFrame for {ticker}"
+
+    def test_equity_columns_present(self, base_sizer, multi_stock_dfs):
+        """Test that equity columns are present for each signal and ticker."""
+        result = run_position_sizing_parallel_over_stocks(
+            sizer=base_sizer,
+            stock_dfs=multi_stock_dfs,
+            signals=['sig_a', 'sig_b'],
+            n_jobs=1,
+        )
+        for ticker, df in result.items():
+            assert 'sig_a_equity_equal' in df.columns, f"{ticker}: missing sig_a columns"
+            assert 'sig_b_equity_equal' in df.columns, f"{ticker}: missing sig_b columns"
+
+    def test_input_dfs_not_modified(self, base_sizer, multi_stock_dfs):
+        """Test that input DataFrames are not mutated."""
+        original_col_counts = {t: len(df.columns) for t, df in multi_stock_dfs.items()}
+
+        run_position_sizing_parallel_over_stocks(
+            sizer=base_sizer,
+            stock_dfs=multi_stock_dfs,
+            signals=['sig_a'],
+            n_jobs=1,
+        )
+
+        for ticker, df in multi_stock_dfs.items():
+            assert len(df.columns) == original_col_counts[ticker], (
+                f"{ticker}: input df was unexpectedly mutated"
+            )
+
+    def test_empty_stock_dfs_raises(self, base_sizer):
+        """Test that empty stock_dfs raises ValueError."""
+        with pytest.raises(ValueError, match="empty"):
+            run_position_sizing_parallel_over_stocks(
+                sizer=base_sizer, stock_dfs={}, signals=['sig_a'], n_jobs=1
+            )
+
+    def test_empty_signals_raises(self, base_sizer, multi_stock_dfs):
+        """Test that empty signals list raises ValueError."""
+        with pytest.raises(ValueError, match="empty"):
+            run_position_sizing_parallel_over_stocks(
+                sizer=base_sizer, stock_dfs=multi_stock_dfs, signals=[], n_jobs=1
+            )
+
+    def test_invalid_n_jobs_raises(self, base_sizer, multi_stock_dfs):
+        """Test that n_jobs=0 raises ValueError."""
+        with pytest.raises(ValueError, match="n_jobs"):
+            run_position_sizing_parallel_over_stocks(
+                sizer=base_sizer,
+                stock_dfs=multi_stock_dfs,
+                signals=['sig_a'],
+                n_jobs=0,
+            )
+
+    def test_single_stock_uses_sequential_path(self, base_sizer, multi_stock_dfs):
+        """Test that a single-stock dict caps effective_jobs to 1."""
+        single = {'ENI.MI': multi_stock_dfs['ENI.MI']}
+        # n_jobs=-1 but only 1 stock: effective_jobs clamps to 1, no Pool spawned
+        result = run_position_sizing_parallel_over_stocks(
+            sizer=base_sizer,
+            stock_dfs=single,
+            signals=['sig_a'],
+            n_jobs=-1,
+        )
+        assert set(result.keys()) == {'ENI.MI'}
+        assert 'sig_a_equity_equal' in result['ENI.MI'].columns
+
+    def test_result_row_count_matches_input(self, base_sizer, multi_stock_dfs):
+        """Test that each result DataFrame has the same row count as the input."""
+        result = run_position_sizing_parallel_over_stocks(
+            sizer=base_sizer,
+            stock_dfs=multi_stock_dfs,
+            signals=['sig_a'],
+            n_jobs=1,
+        )
+        for ticker, df in result.items():
+            assert len(df) == len(multi_stock_dfs[ticker]), (
+                f"{ticker}: row count mismatch"
+            )
