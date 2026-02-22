@@ -120,8 +120,10 @@ class PositionSizing:
         # Use absolute risk per share to handle both long and short positions
         risk_per_share = abs(sl - px)
 
-        # Guard against stop loss too close to price (near-zero risk)
-        if risk_per_share < 1e-10:
+        # Guard against stop loss too close to price (near-zero risk).
+        # Use a relative threshold: risk < 1e-8 of price accounts for
+        # floating-point imprecision when sl and px are nearly equal.
+        if risk_per_share / px < 1e-8:
             logger.warning(f"Stop loss ({sl}) too close to price ({px})")
             return 0
 
